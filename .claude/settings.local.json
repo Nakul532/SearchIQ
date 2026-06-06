@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(claude-api)",
+      "Bash(python3 -m py_compile search_agent.py)",
+      "Bash(python3 -c \"import anthropic; print\\('anthropic', anthropic.__version__\\)\")",
+      "Bash(python3 -m pip install --quiet anthropic)",
+      "Bash(python3 -m pip install --quiet flask)",
+      "Bash(python3 -c \"import flask; print\\('flask', flask.__version__\\)\")",
+      "Bash(python3 -m py_compile app.py search_agent.py)",
+      "Bash(ANTHROPIC_API_KEY=dummy python3 *)",
+      "Bash(python3 -c ' *)",
+      "Bash(node --check static/app.js)",
+      "Bash(node -e \"require\\('jsdom'\\); console.log\\('jsdom available'\\)\")",
+      "Bash(npm install *)",
+      "Bash(node -e \"require\\('jsdom'\\); console.log\\('jsdom ready'\\)\")"
+    ]
+  }
+}
