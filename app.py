@@ -256,4 +256,7 @@ if __name__ == "__main__":
     # Debug off by default: the Werkzeug interactive debugger returns an HTML
     # error page that overrides our JSON error handlers. Opt in with FLASK_DEBUG=1.
     debug = os.environ.get("FLASK_DEBUG") == "1"
-    app.run(host="127.0.0.1", port=5000, debug=debug)
+    # Bind to 0.0.0.0 and the platform-provided $PORT so Railway (and other
+    # PaaS hosts) can route to the app; fall back to 5000 for local dev.
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=debug)

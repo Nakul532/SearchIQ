@@ -1,0 +1,16 @@
+# Local SQLite data (use a Railway volume in production)
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secrets / local env
+.env
+.env.*
+
+# Node (only used for throwaway test tooling)
+node_modules/
+package-lock.json
