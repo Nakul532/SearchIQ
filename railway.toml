@@ -1,0 +1,18 @@
+# Railway deployment config for SearchIQ.
+# Nixpacks auto-detects Python and installs requirements.txt; the start command
+# below runs the app under gunicorn (a real WSGI server) instead of Flask's dev
+# server.
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+# --bind 0.0.0.0:$PORT  → listen on Railway's injected port
+# --timeout 120         → web-search queries can take a while; don't let gunicorn
+#                         kill the worker mid-request (default is 30s)
+# --workers 2 --threads 4 → handle several slow, I/O-bound requests concurrently
+#                           (each request opens its own SQLite connection, so
+#                            threads are safe here)
+startCommand = "gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 2 --threads 4"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3

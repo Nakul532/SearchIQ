@@ -28,7 +28,32 @@ import textwrap
 import anthropic
 
 MODEL = "claude-opus-4-8"
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "search_agent.db")
+
+
+def _resolve_db_path() -> str:
+    """Pick where the SQLite DB lives, honoring a persistent volume if present.
+
+    Priority:
+      1. DB_PATH env var — explicit full path to the .db file.
+      2. RAILWAY_VOLUME_MOUNT_PATH — Railway injects this when a volume is
+         attached; the DB goes inside it as search_agent.db so data survives
+         redeploys/restarts.
+      3. Local file next to this script (default for local dev).
+    The parent directory is created if needed.
+    """
+    explicit = os.environ.get("DB_PATH")
+    volume = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    if explicit:
+        path = explicit
+    elif volume:
+        path = os.path.join(volume, "search_agent.db")
+    else:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "search_agent.db")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    return path
+
+
+DB_PATH = _resolve_db_path()
 MAX_RETRIES = 2          # how many rephrase-and-retry rounds per failed query
 DASHBOARD_EVERY = 5      # show the dashboard after this many queries
 LESSON_CONTEXT_LIMIT = 8 # how many recent feedback lessons to feed the model
