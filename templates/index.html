@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SearchIQ · Self-improving AI search</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@600;700;800&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <div class="bg-orbs" aria-hidden="true"></div>
+
+  <div class="layout">
+    <!-- Header -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="white" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="10.5" cy="10.5" r="6.4" />
+            <path d="M20 20l-4.2-4.2" />
+            <path d="M10.5 7.6v5.8M7.6 10.5h5.8" opacity="0.55" />
+          </svg>
+        </div>
+        <div class="brand-text">
+          <div class="brand-name">SearchIQ<span class="brand-chip">AI</span></div>
+          <div class="brand-tag">Self-improving AI search</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="live-pill"><span class="status-dot"></span> Live</div>
+        <button id="resetBtn" class="ghost-btn" title="Clear all data for a fresh demo">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+          Reset
+        </button>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- Chat -->
+      <section class="chat panel">
+        <div id="messages" class="messages">
+          <div class="welcome">
+            <div class="welcome-logo">
+              <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="white" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="10.5" cy="10.5" r="6.4" /><path d="M20 20l-4.2-4.2" />
+              </svg>
+            </div>
+            <h2>Ask anything</h2>
+            <p>SearchIQ searches the web in real time, blends it with reasoning, and
+               learns from your feedback — getting sharper with every query.</p>
+            <div class="suggestions">
+              <button class="chip">What is the capital of Australia?</button>
+              <button class="chip">Best database for a Python side project</button>
+              <button class="chip">Latest news on AI regulation</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="composer">
+          <div class="composer-inner">
+            <textarea id="queryInput" rows="1" placeholder="Ask SearchIQ anything…"></textarea>
+            <button id="sendBtn" class="send-btn" aria-label="Send">
+              <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3.4 20.4 21 12 3.4 3.6 3 10l12 2-12 2z"/></svg>
+            </button>
+          </div>
+          <div class="composer-hint">SearchIQ can search the web · Press <kbd>Enter</kbd> to send</div>
+        </div>
+      </section>
+
+      <!-- Dashboard -->
+      <aside class="dashboard">
+        <div class="card northstar">
+          <div class="card-head">
+            <span class="card-label">North Star Metric</span>
+            <span class="star">★</span>
+          </div>
+          <div class="northstar-title">Task Completion Rate</div>
+          <div class="northstar-value"><span id="completionRate">0</span><span class="pct">%</span></div>
+          <div class="northstar-track"><div id="northstarBar" class="northstar-fill"></div></div>
+          <div class="card-sub">Share of rated queries that earned a 👍</div>
+        </div>
+
+        <div class="stat-row">
+          <div class="card stat">
+            <div class="stat-value" id="totalQueries">0</div>
+            <div class="stat-label">Queries</div>
+          </div>
+          <div class="card stat">
+            <div class="stat-value" id="ratedQueries">0</div>
+            <div class="stat-label">Rated</div>
+          </div>
+          <div class="card stat">
+            <div class="stat-value accent" id="improvedCount">0</div>
+            <div class="stat-label">Improved</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-label">Recent feedback</div>
+          <div id="feedbackChart" class="feedback-chart"></div>
+          <div class="legend">
+            <span><i class="dot up"></i> Helpful <b id="upCount">0</b></span>
+            <span><i class="dot down"></i> Not helpful <b id="downCount">0</b></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-label">🧠 Most improved <span class="muted">(👎→👍 after retry)</span></div>
+          <ul id="improvedList" class="improved-list">
+            <li class="empty">No improvements yet</li>
+          </ul>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
