@@ -33,7 +33,12 @@
       "Bash(pkill -f \"python3 app.py\")",
       "Bash(rm -f /tmp/searchiq_mem*.log)",
       "Bash(RAILWAY_VOLUME_MOUNT_PATH=/data python3 -c \"import search_agent as sa; print\\('   DB_PATH =', sa.DB_PATH\\)\")",
-      "Bash(DB_PATH=/data/custom.db RAILWAY_VOLUME_MOUNT_PATH=/data python3 -c \"import search_agent as sa; print\\('   DB_PATH =', sa.DB_PATH\\)\")"
+      "Bash(DB_PATH=/data/custom.db RAILWAY_VOLUME_MOUNT_PATH=/data python3 -c \"import search_agent as sa; print\\('   DB_PATH =', sa.DB_PATH\\)\")",
+      "Bash(DB_PATH=/tmp/test_restore.db python3 import_db.py)",
+      "Bash(rm -f /tmp/test_restore.db)",
+      "Bash(DB_PATH=/tmp/test_ep.db MIGRATE_TOKEN=secret123 python3 -c ' *)",
+      "Bash(rm -f /tmp/test_ep.db)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
