@@ -12,6 +12,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 
@@ -80,11 +81,6 @@ def db() -> sqlite3.Connection:
     return conn
 
 
-def generate_answer_text(query: str, lessons: list[str]) -> tuple[str, list[dict]]:
-    """Web-search RAG answer for the web flow. Returns (answer, sources)."""
-    return sa.search_and_answer(client, query, lessons)
-
-
 def metrics_payload(conn: sqlite3.Connection) -> dict:
     m = sa.compute_metrics(conn)
     rows = conn.execute(
@@ -99,6 +95,9 @@ def metrics_payload(conn: sqlite3.Connection) -> dict:
     m["thumbs_up"] = recent.count("up")
     m["thumbs_down"] = recent.count("down")
     m["improved_count"] = len(m["most_improved"])
+    # Visible learning loop: lessons feed + training-progress totals.
+    m["lessons_feed"] = sa.all_lessons(conn)
+    m["training_progress"] = sa.training_progress(conn)
     return m
 
 
@@ -123,37 +122,142 @@ def api_metrics():
 def api_query():
     data = request.get_json(silent=True) or {}
     query = str(data.get("query", "")).strip()
+    force = bool(data.get("force"))  # bypass the clarifying-question check
     if not query:
         return json_error("Query is empty.", 400, "invalid_request")
+
+    # Pre-processor step 1: if the query is ambiguous, ask before answering.
+    # The user can tap a chip (which refines the query) or resend with force=true.
+    if not force:
+        chips = sa.clarifying_questions(query)
+        if chips:
+            return jsonify({"clarify": chips, "original_query": query})
 
     conn = db()
     try:
         group = sa.next_query_group(conn)
-        lessons = sa.recent_lessons(conn)
+        # Apply lessons learned from past preferences on similar queries.
+        applied = sa.match_lessons(conn, query)
+        lesson_texts = [l["text"] for l in applied]
+        applied_ids = [l["id"] for l in applied]
+        # Pre-processor step 2: classify complexity → choose the aggregation model.
+        routing = sa.classify_query(query)
         try:
-            answer, sources = generate_answer_text(query, lessons)
+            answers = sa.generate_ab_answers(client, query, lesson_texts, routing)
         except anthropic.APIError as exc:
             return claude_error(exc) or json_error(str(exc), 502, "api_error")
 
-        interaction_id = sa.insert_answer(
+        if applied_ids:
+            sa.bump_applied_count(conn, applied_ids)
+        comparison_id = sa.record_comparison(
             conn,
             query_group=group,
             original_query=query,
             effective_query=query,
-            answer=answer,
-            attempt=1,
-            sources=sources,
+            answers=answers,
+            routing=routing,
+            lessons_applied=applied_ids,
         )
         return jsonify(
             {
-                "interaction_id": interaction_id,
+                "comparison_id": comparison_id,
                 "group_id": group,
                 "original_query": query,
                 "effective_query": query,
-                "answer": answer,
-                "sources": sources,
-                "attempt": 1,
-                "lessons_applied": len(lessons),
+                "routing": routing,
+                "answer_a": answers["a"]["answer"],
+                "sources_a": answers["a"]["sources"],
+                "answer_b": answers["b"]["answer"],
+                "sources_b": answers["b"]["sources"],
+                "applied_lessons": applied,
+                "applied_count": len(applied),
+            }
+        )
+    finally:
+        conn.close()
+
+
+@app.route("/api/prefer", methods=["POST"])
+def api_prefer():
+    """Record which A/B answer the user preferred.
+
+    Winner → a positive interaction; loser → a negative one (so the North Star
+    completion-rate and feedback history stay intact). The lesson is created
+    later, once the user gives a reason (see /api/prefer_reason).
+    """
+    data = request.get_json(silent=True) or {}
+    comparison_id = data.get("comparison_id")
+    preferred = data.get("preferred")  # 'A' | 'B'
+    if comparison_id is None or preferred not in ("A", "B"):
+        return json_error("Missing comparison_id or invalid preference.", 400, "invalid_request")
+
+    conn = db()
+    try:
+        comp = sa.get_comparison(conn, int(comparison_id))
+        if not comp:
+            return json_error("Comparison not found.", 404, "not_found_error")
+
+        routing = json.loads(comp["routing"]) if comp["routing"] else None
+        win_answer = comp["answer_a"] if preferred == "A" else comp["answer_b"]
+        lose_answer = comp["answer_b"] if preferred == "A" else comp["answer_a"]
+        win_sources = comp["sources_a"] if preferred == "A" else comp["sources_b"]
+        lose_sources = comp["sources_b"] if preferred == "A" else comp["sources_a"]
+
+        def _src(s):
+            try:
+                return json.loads(s) if s else []
+            except (json.JSONDecodeError, TypeError):
+                return []
+
+        sa.set_preference(conn, int(comparison_id), preferred)
+        # Winner = thumbs up (attempt 1), loser = thumbs down (attempt 2).
+        sa.record_interaction(
+            conn, query_group=comp["query_group"], original_query=comp["original_query"],
+            effective_query=comp["effective_query"], answer=win_answer, feedback="up",
+            comment=None, attempt=1, sources=_src(win_sources), routing=routing,
+        )
+        sa.record_interaction(
+            conn, query_group=comp["query_group"], original_query=comp["original_query"],
+            effective_query=comp["effective_query"], answer=lose_answer, feedback="down",
+            comment=None, attempt=2, sources=_src(lose_sources), routing=routing,
+        )
+        return jsonify({"status": "ok", "preferred": preferred, "metrics": metrics_payload(conn)})
+    finally:
+        conn.close()
+
+
+@app.route("/api/prefer_reason", methods=["POST"])
+def api_prefer_reason():
+    """Record why the user preferred an answer, and learn a lesson from it.
+
+    Returns the plain-English "Learning Card" text plus refreshed metrics so the
+    Lessons feed and Training Progress update immediately.
+    """
+    data = request.get_json(silent=True) or {}
+    comparison_id = data.get("comparison_id")
+    reason = (data.get("reason") or "").strip()
+    if comparison_id is None or not reason:
+        return json_error("Missing comparison_id or reason.", 400, "invalid_request")
+
+    conn = db()
+    try:
+        comp = sa.get_comparison(conn, int(comparison_id))
+        if not comp:
+            return json_error("Comparison not found.", 404, "not_found_error")
+        if comp["preferred"] not in ("A", "B"):
+            return json_error("Record a preference before a reason.", 400, "invalid_request")
+
+        sa.set_reason(conn, int(comparison_id), reason)
+        topic = sa.extract_topic(comp["original_query"])
+        lesson = sa.record_lesson(
+            conn, topic=topic, winning_style=comp["preferred"], reason=reason
+        )
+        return jsonify(
+            {
+                "status": "ok",
+                "learning_card": lesson["text"],
+                "lesson": lesson,
+                "metrics": metrics_payload(conn),
             }
         )
     finally:
@@ -206,6 +310,9 @@ def api_feedback():
                 except anthropic.APIError as exc:
                     # Feedback is already saved; report the retry failure as JSON.
                     return claude_error(exc) or json_error(str(exc), 502, "api_error")
+                # Retries reuse prior sources and improve the answer with the
+                # capable model (Sonnet) — see search_agent.regenerate_answer.
+                retry_routing = sa.build_routing("complex")
                 new_id = sa.insert_answer(
                     conn,
                     query_group=int(group_id),
@@ -214,6 +321,7 @@ def api_feedback():
                     answer=new_answer,
                     attempt=attempts + 1,
                     sources=reused_sources,
+                    routing=retry_routing,
                 )
                 retry = {
                     "interaction_id": new_id,
@@ -224,6 +332,7 @@ def api_feedback():
                     "sources": reused_sources,
                     "attempt": attempts + 1,
                     "lessons_applied": len(lessons),
+                    "routing": retry_routing,
                 }
 
         return jsonify(
@@ -240,10 +349,12 @@ def api_feedback():
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
-    """Clear all interactions — handy for starting a clean demo."""
+    """Clear all interactions, comparisons, and lessons — for a clean demo."""
     conn = db()
     try:
         conn.execute("DELETE FROM interactions")
+        conn.execute("DELETE FROM comparisons")
+        conn.execute("DELETE FROM lessons")
         conn.commit()
         return jsonify({"status": "ok", "metrics": metrics_payload(conn)})
     finally:
@@ -258,5 +369,5 @@ if __name__ == "__main__":
     debug = os.environ.get("FLASK_DEBUG") == "1"
     # Bind to 0.0.0.0 and the platform-provided $PORT so Railway (and other
     # PaaS hosts) can route to the app; fall back to 5000 for local dev.
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5001))
     app.run(host="0.0.0.0", port=port, debug=debug)
