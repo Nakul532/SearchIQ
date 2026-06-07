@@ -301,19 +301,14 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    # Migration: add columns to pre-existing databases.
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(interactions)")]
-    if "sources" not in cols:
-        conn.execute("ALTER TABLE interactions ADD COLUMN sources TEXT")  # JSON list of {url,title}
-    if "routing" not in cols:
-        conn.execute("ALTER TABLE interactions ADD COLUMN routing TEXT")  # JSON routing decision
-
     # A/B answer comparisons — two answers per query, plus the user's preference.
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS comparisons (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             query_group     INTEGER NOT NULL,
+            session_id      TEXT,              -- per-browser session (see localStorage)
+            conversation_id TEXT,              -- which chat this belongs to
             original_query  TEXT    NOT NULL,
             effective_query TEXT    NOT NULL,  -- after a clarifying chip is appended
             answer_a        TEXT    NOT NULL,
@@ -333,6 +328,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS lessons (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id    TEXT,                -- lessons are scoped per session/user
             topic         TEXT    NOT NULL,   -- extracted query topic ('tools', 'python', …)
             winning_style TEXT    NOT NULL,   -- 'A' (concise) | 'B' (detailed)
             reason        TEXT,               -- 'more accurate' | 'clearer explanation' | 'better sources'
@@ -342,6 +338,34 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # Full conversation transcript — one row per user/assistant turn, linked by
+    # conversation_id and scoped to a session. Powers memory + the history sidebar.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT    NOT NULL,
+            conversation_id TEXT    NOT NULL,
+            role            TEXT    NOT NULL,  -- 'user' | 'assistant'
+            content         TEXT    NOT NULL,
+            sources         TEXT,              -- JSON list of {url,title} (assistant turns)
+            created_at      TEXT    NOT NULL
+        )
+        """
+    )
+
+    # Migrations: add columns to pre-existing tables (idempotent).
+    def _ensure(table: str, col: str, decl: str) -> None:
+        existing = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+        if col not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+    _ensure("interactions", "sources", "TEXT")
+    _ensure("interactions", "routing", "TEXT")
+    _ensure("interactions", "session_id", "TEXT")
+    _ensure("comparisons", "session_id", "TEXT")
+    _ensure("comparisons", "conversation_id", "TEXT")
+    _ensure("lessons", "session_id", "TEXT")
     conn.commit()
 
 
@@ -362,13 +386,14 @@ def record_interaction(
     attempt: int,
     sources: list[dict] | None = None,
     routing: dict | None = None,
+    session_id: str | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO interactions
             (query_group, original_query, effective_query, answer,
-             feedback, comment, attempt, created_at, sources, routing)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             feedback, comment, attempt, created_at, sources, routing, session_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             query_group,
@@ -381,6 +406,7 @@ def record_interaction(
             _dt.datetime.now().isoformat(timespec="seconds"),
             json.dumps(sources or []),
             json.dumps(routing) if routing else None,
+            session_id,
         ),
     )
     conn.commit()
@@ -527,17 +553,22 @@ def record_comparison(
     answers: dict,
     routing: dict,
     lessons_applied: list[int],
+    session_id: str | None = None,
+    conversation_id: str | None = None,
 ) -> int:
     """Persist a freshly generated A/B pair (no preference yet); return its id."""
     cur = conn.execute(
         """
         INSERT INTO comparisons
-            (query_group, original_query, effective_query, answer_a, answer_b,
-             sources_a, sources_b, routing, preferred, reason, lessons_applied, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+            (query_group, session_id, conversation_id, original_query, effective_query,
+             answer_a, answer_b, sources_a, sources_b, routing, preferred, reason,
+             lessons_applied, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
         """,
         (
             query_group,
+            session_id,
+            conversation_id,
             original_query,
             effective_query,
             answers["a"]["answer"],
@@ -556,17 +587,124 @@ def record_comparison(
 def get_comparison(conn: sqlite3.Connection, comparison_id: int) -> dict | None:
     row = conn.execute(
         """
-        SELECT id, query_group, original_query, effective_query, answer_a, answer_b,
-               sources_a, sources_b, routing, preferred, reason
+        SELECT id, query_group, session_id, conversation_id, original_query, effective_query,
+               answer_a, answer_b, sources_a, sources_b, routing, preferred, reason
         FROM comparisons WHERE id = ?
         """,
         (comparison_id,),
     ).fetchone()
     if not row:
         return None
-    keys = ["id", "query_group", "original_query", "effective_query", "answer_a",
-            "answer_b", "sources_a", "sources_b", "routing", "preferred", "reason"]
+    keys = ["id", "query_group", "session_id", "conversation_id", "original_query",
+            "effective_query", "answer_a", "answer_b", "sources_a", "sources_b",
+            "routing", "preferred", "reason"]
     return dict(zip(keys, row))
+
+
+# --------------------------------------------------------------------------- #
+# Conversation transcript (memory + history sidebar)
+# --------------------------------------------------------------------------- #
+def save_message(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    conversation_id: str,
+    role: str,
+    content: str,
+    sources: list[dict] | None = None,
+) -> int:
+    """Append one turn to the conversation transcript; return its row id."""
+    cur = conn.execute(
+        """
+        INSERT INTO messages (session_id, conversation_id, role, content, sources, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            session_id,
+            conversation_id,
+            role,
+            content,
+            json.dumps(sources) if sources else None,
+            _dt.datetime.now().isoformat(timespec="seconds"),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def conversation_history(
+    conn: sqlite3.Connection, conversation_id: str, limit: int = 10
+) -> list[dict]:
+    """Return the last ``limit`` turns as [{role, content}] for Claude's context.
+
+    This is what makes follow-ups work ("tell me more about point 2"): the prior
+    user/assistant turns are replayed to the model before the new question.
+    """
+    rows = conn.execute(
+        """
+        SELECT role, content FROM messages
+        WHERE conversation_id = ?
+        ORDER BY id DESC LIMIT ?
+        """,
+        (conversation_id, limit),
+    ).fetchall()
+    return [{"role": r, "content": c} for (r, c) in reversed(rows)]
+
+
+def load_conversation(conn: sqlite3.Connection, session_id: str, conversation_id: str) -> list[dict]:
+    """Return the full transcript of a conversation (for rendering when reopened).
+
+    Scoped by session_id so one browser can't read another's history.
+    """
+    rows = conn.execute(
+        """
+        SELECT role, content, sources, created_at FROM messages
+        WHERE session_id = ? AND conversation_id = ?
+        ORDER BY id ASC
+        """,
+        (session_id, conversation_id),
+    ).fetchall()
+    out = []
+    for role, content, sources, created in rows:
+        try:
+            src = json.loads(sources) if sources else []
+        except (json.JSONDecodeError, TypeError):
+            src = []
+        out.append({"role": role, "content": content, "sources": src, "created_at": created})
+    return out
+
+
+def list_conversations(conn: sqlite3.Connection, session_id: str) -> list[dict]:
+    """List a session's conversations for the sidebar (newest activity first).
+
+    Title = the first user message; sorted by the latest message in each chat.
+    """
+    rows = conn.execute(
+        """
+        SELECT conversation_id,
+               MIN(CASE WHEN role = 'user' THEN id END) AS first_user_id,
+               MAX(created_at) AS last_at,
+               COUNT(*) AS n
+        FROM messages
+        WHERE session_id = ?
+        GROUP BY conversation_id
+        ORDER BY MAX(id) DESC
+        """,
+        (session_id,),
+    ).fetchall()
+    out = []
+    for conv_id, first_user_id, last_at, n in rows:
+        title = ""
+        if first_user_id is not None:
+            t = conn.execute("SELECT content FROM messages WHERE id = ?", (first_user_id,)).fetchone()
+            title = t[0] if t else ""
+        out.append({
+            "conversation_id": conv_id,
+            "title": title or "New conversation",
+            "last_at": last_at,
+            "message_count": int(n),
+        })
+    return out
 
 
 def set_preference(conn: sqlite3.Connection, comparison_id: int, preferred: str) -> None:
@@ -595,12 +733,15 @@ def format_lesson(topic: str, winning_style: str, reason: str | None) -> str:
 
 
 def record_lesson(
-    conn: sqlite3.Connection, *, topic: str, winning_style: str, reason: str | None
+    conn: sqlite3.Connection, *, topic: str, winning_style: str, reason: str | None,
+    session_id: str | None = None,
 ) -> dict:
     """Create a lesson from a preference, or reinforce an existing matching one.
 
-    If a lesson already exists for the same topic + winning style, its reason is
-    refreshed rather than creating a duplicate. Returns the lesson as a dict.
+    Lessons are GLOBAL — every session teaches one shared SearchIQ (the dashboard
+    aggregates them across all users). If a lesson already exists for the same
+    topic + winning style, its reason is refreshed rather than duplicated. The
+    originating ``session_id`` is still stored for provenance. Returns the lesson.
     """
     existing = conn.execute(
         "SELECT id FROM lessons WHERE topic = ? AND winning_style = ?",
@@ -616,10 +757,10 @@ def record_lesson(
     else:
         cur = conn.execute(
             """
-            INSERT INTO lessons (topic, winning_style, reason, text, applied_count, created_at)
-            VALUES (?, ?, ?, ?, 0, ?)
+            INSERT INTO lessons (session_id, topic, winning_style, reason, text, applied_count, created_at)
+            VALUES (?, ?, ?, ?, ?, 0, ?)
             """,
-            (topic, winning_style, reason, text, _dt.datetime.now().isoformat(timespec="seconds")),
+            (session_id, topic, winning_style, reason, text, _dt.datetime.now().isoformat(timespec="seconds")),
         )
         lesson_id = int(cur.lastrowid)
     conn.commit()
@@ -627,10 +768,10 @@ def record_lesson(
 
 
 def match_lessons(conn: sqlite3.Connection, query: str, limit: int = 5) -> list[dict]:
-    """Return lessons relevant to a query — those whose topic appears in it.
+    """Return lessons relevant to a query (topic appears in it), across all sessions.
 
-    This is how a winning style becomes the preferred pattern for SIMILAR future
-    queries. Returns dicts {id, text, topic}, most-recently-learned first.
+    Lessons are shared globally, so a winning style learned by anyone becomes the
+    preferred pattern for SIMILAR future queries. Returns dicts {id, text, topic}.
     """
     q = (query or "").lower()
     rows = conn.execute(
@@ -656,7 +797,7 @@ def bump_applied_count(conn: sqlite3.Connection, lesson_ids: list[int]) -> None:
 
 
 def all_lessons(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
-    """Return the lessons feed for the dashboard, most-recently-learned first."""
+    """Return the global lessons feed for the dashboard, newest first."""
     rows = conn.execute(
         """
         SELECT id, text, topic, applied_count, created_at
@@ -671,7 +812,7 @@ def all_lessons(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
 
 
 def training_progress(conn: sqlite3.Connection) -> dict:
-    """Totals for the Training Progress stat: lessons learned + times applied."""
+    """Global totals for the Training Progress stat: lessons learned + times applied."""
     learned = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
     applied = conn.execute("SELECT COALESCE(SUM(applied_count), 0) FROM lessons").fetchone()[0]
     return {"lessons_learned": int(learned), "lessons_applied": int(applied)}
@@ -752,6 +893,25 @@ def extract_sources(message) -> list[dict]:
     return sources[:MAX_SOURCES]
 
 
+def _history_messages(history: list[dict] | None, query: str) -> list[dict]:
+    """Build the messages array: prior conversation turns, then the new question.
+
+    ``history`` is [{role, content}] from conversation_history(). Only user/
+    assistant roles with non-empty content are kept, and a leading assistant turn
+    is dropped so the array always starts with a user message (API requirement).
+    """
+    msgs: list[dict] = []
+    for h in history or []:
+        role = h.get("role")
+        content = (h.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            msgs.append({"role": role, "content": content})
+    while msgs and msgs[0]["role"] != "user":
+        msgs.pop(0)
+    msgs.append({"role": "user", "content": query})
+    return msgs
+
+
 def search_and_answer(
     client: anthropic.Anthropic,
     query: str,
@@ -759,22 +919,24 @@ def search_and_answer(
     routing: dict,
     style: str | None = None,
     on_text=None,
+    history: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     """Answer a query with web-search RAG, aggregated by the routed model.
 
     Web search ALWAYS runs (same retrieval for every query) — ``routing`` (from
     classify_query) only selects which model aggregates the results into the
     answer: Haiku for simple/medium, Sonnet for complex. ``style`` (STYLE_A /
-    STYLE_B) tunes the synthesis approach for A/B comparison. Returns
-    (answer_text, sources). If ``on_text`` is given, text chunks are streamed to
-    it as they arrive (used by the terminal for live output).
+    STYLE_B) tunes the synthesis approach for A/B comparison. ``history`` (prior
+    conversation turns) is prepended so follow-up questions resolve in context.
+    Returns (answer_text, sources). If ``on_text`` is given, text chunks are
+    streamed to it as they arrive (used by the terminal for live output).
     """
     kwargs = dict(
         model=routing["model"],
         max_tokens=8000,
         system=build_system_prompt(lessons, style=style),
         tools=[WEB_SEARCH_TOOL],
-        messages=[{"role": "user", "content": query}],
+        messages=_history_messages(history, query),
         **_reasoning_kwargs(routing["model"]),
     )
 
@@ -789,24 +951,74 @@ def search_and_answer(
 
 
 def generate_ab_answers(
-    client: anthropic.Anthropic, query: str, lessons: list[str], routing: dict
+    client: anthropic.Anthropic,
+    query: str,
+    lessons: list[str],
+    routing: dict,
+    history: list[dict] | None = None,
 ) -> dict:
     """Generate two web-grounded answers in parallel for side-by-side comparison.
 
     Answer A is factual & concise; Answer B is detailed & analytical. Both run
-    web search with the routed model; running them on threads keeps total latency
-    close to a single answer (the calls are I/O-bound on the API). Returns
-    {"a": {answer, sources}, "b": {answer, sources}}.
+    web search with the routed model and share the same conversation ``history``;
+    running them on threads keeps total latency close to a single answer.
+
+    Resilient to a flaky API: if one of the two calls fails, we fall back to
+    whichever answer succeeded and flag ``single`` so the caller serves one
+    answer instead of failing the whole request. Returns
+    {"a": {...}, "b": {...} | None, "single": bool}. Raises only if BOTH fail.
     """
     with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_a = pool.submit(search_and_answer, client, query, lessons, routing, STYLE_A)
-        fut_b = pool.submit(search_and_answer, client, query, lessons, routing, STYLE_B)
-        ans_a, src_a = fut_a.result()
-        ans_b, src_b = fut_b.result()
-    return {
-        "a": {"answer": ans_a, "sources": src_a},
-        "b": {"answer": ans_b, "sources": src_b},
-    }
+        futures = {
+            "a": pool.submit(search_and_answer, client, query, lessons, routing, STYLE_A, None, history),
+            "b": pool.submit(search_and_answer, client, query, lessons, routing, STYLE_B, None, history),
+        }
+        results: dict[str, dict] = {}
+        errors: list[Exception] = []
+        for key, fut in futures.items():  # .result() waits for both either way
+            try:
+                ans, src = fut.result()
+                results[key] = {"answer": ans, "sources": src}
+            except Exception as exc:  # noqa: BLE001 — keep the other answer alive
+                errors.append(exc)
+
+    if "a" in results and "b" in results:
+        return {"a": results["a"], "b": results["b"], "single": False}
+    if results:  # exactly one survived — serve it as a single answer
+        only = results.get("a") or results.get("b")
+        return {"a": only, "b": None, "single": True}
+    raise errors[0]  # both failed — surface the error to the caller
+
+
+def suggest_followups(
+    client: anthropic.Anthropic, query: str, answer: str, n: int = 3
+) -> list[str]:
+    """Suggest ``n`` short follow-up questions based on an answer (cheap Haiku call).
+
+    Returns a list of question strings, or [] on any failure (non-critical UI).
+    """
+    prompt = (
+        f"A user asked: {query}\n\n"
+        f"They received this answer:\n{answer[:1500]}\n\n"
+        f"Suggest {n} natural follow-up questions the user might ask next. "
+        "Each must be short (under 8 words), specific, and standalone. "
+        f"Reply with ONLY the {n} questions, one per line, no numbering or extra text."
+    )
+    try:
+        resp = client.messages.create(
+            model=HAIKU_MODEL,
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.APIError:
+        return []
+    text = next((b.text for b in resp.content if b.type == "text"), "")
+    lines = [
+        ln.strip().lstrip("-*0123456789. ").strip()
+        for ln in text.splitlines()
+        if ln.strip()
+    ]
+    return [ln for ln in lines if ln][:n]
 
 
 def regenerate_answer(
@@ -936,7 +1148,12 @@ def collect_feedback() -> tuple[str | None, str | None]:
 # Dashboard / metrics
 # --------------------------------------------------------------------------- #
 def compute_metrics(conn: sqlite3.Connection) -> dict:
-    """Compute query-group-level metrics for the dashboard."""
+    """Compute query-group-level metrics for the dashboard, GLOBALLY.
+
+    The North Star — total queries, completion rate, model mix, cost saved — is
+    an all-time, all-session view of the whole system (only the conversation
+    history sidebar is per-session).
+    """
     rows = conn.execute(
         """
         SELECT query_group, original_query, attempt, feedback, routing
