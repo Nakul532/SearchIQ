@@ -28,7 +28,10 @@
       "Bash(git add *)",
       "Bash(git commit -q -m 'Add Railway deploy config \\(gunicorn, volume-aware DB\\) *)",
       "Bash(git push *)",
-      "Bash(cd *)"
+      "Bash(cd *)",
+      "Bash(python3 *)",
+      "Bash(pkill -f \"python3 app.py\")",
+      "Bash(rm -f /tmp/searchiq_mem*.log)"
     ]
   }
 }

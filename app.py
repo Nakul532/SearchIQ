@@ -81,7 +81,13 @@ def db() -> sqlite3.Connection:
     return conn
 
 
+def session_id() -> str | None:
+    """The per-browser session id sent in the X-Session-Id header (or None)."""
+    return (request.headers.get("X-Session-Id") or "").strip() or None
+
+
 def metrics_payload(conn: sqlite3.Connection) -> dict:
+    """Build the GLOBAL dashboard payload (all sessions, all time)."""
     m = sa.compute_metrics(conn)
     rows = conn.execute(
         """
@@ -95,7 +101,7 @@ def metrics_payload(conn: sqlite3.Connection) -> dict:
     m["thumbs_up"] = recent.count("up")
     m["thumbs_down"] = recent.count("down")
     m["improved_count"] = len(m["most_improved"])
-    # Visible learning loop: lessons feed + training-progress totals.
+    # Visible learning loop: lessons feed + training-progress totals (global).
     m["lessons_feed"] = sa.all_lessons(conn)
     m["training_progress"] = sa.training_progress(conn)
     return m
@@ -111,9 +117,39 @@ def index():
 
 @app.route("/api/metrics")
 def api_metrics():
+    sid = session_id()
     conn = db()
     try:
         return jsonify(metrics_payload(conn))
+    finally:
+        conn.close()
+
+
+@app.route("/api/conversations")
+def api_conversations():
+    """List this session's past conversations for the history sidebar."""
+    sid = session_id()
+    if not sid:
+        return jsonify({"conversations": []})
+    conn = db()
+    try:
+        return jsonify({"conversations": sa.list_conversations(conn, sid)})
+    finally:
+        conn.close()
+
+
+@app.route("/api/conversation/<conversation_id>")
+def api_conversation(conversation_id: str):
+    """Load the full transcript of one past conversation (scoped to the session)."""
+    sid = session_id()
+    if not sid:
+        return json_error("Missing session id.", 400, "invalid_request")
+    conn = db()
+    try:
+        return jsonify({
+            "conversation_id": conversation_id,
+            "messages": sa.load_conversation(conn, sid, conversation_id),
+        })
     finally:
         conn.close()
 
@@ -123,8 +159,12 @@ def api_query():
     data = request.get_json(silent=True) or {}
     query = str(data.get("query", "")).strip()
     force = bool(data.get("force"))  # bypass the clarifying-question check
+    conversation_id = str(data.get("conversation_id", "")).strip()
+    sid = session_id()
     if not query:
         return json_error("Query is empty.", 400, "invalid_request")
+    if not sid or not conversation_id:
+        return json_error("Missing session or conversation id.", 400, "invalid_request")
 
     # Pre-processor step 1: if the query is ambiguous, ask before answering.
     # The user can tap a chip (which refines the query) or resend with force=true.
@@ -135,20 +175,57 @@ def api_query():
 
     conn = db()
     try:
+        # Load prior turns for context (this question is saved only after the
+        # answers come back, so a transient API failure leaves no dangling turn).
+        history = sa.conversation_history(conn, conversation_id, limit=10)
+
         group = sa.next_query_group(conn)
-        # Apply lessons learned from past preferences on similar queries.
+        # Apply lessons the whole system has learned from past preferences on similar queries.
         applied = sa.match_lessons(conn, query)
         lesson_texts = [l["text"] for l in applied]
         applied_ids = [l["id"] for l in applied]
         # Pre-processor step 2: classify complexity → choose the aggregation model.
         routing = sa.classify_query(query)
         try:
-            answers = sa.generate_ab_answers(client, query, lesson_texts, routing)
+            answers = sa.generate_ab_answers(client, query, lesson_texts, routing, history=history)
         except anthropic.APIError as exc:
             return claude_error(exc) or json_error(str(exc), 502, "api_error")
 
+        # Record the user's turn now that we have answers to pair it with.
+        sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
+                        role="user", content=query)
         if applied_ids:
             sa.bump_applied_count(conn, applied_ids)
+
+        # Fallback: only one of the two answers came back. Serve it directly —
+        # there's nothing to compare, so commit it as the assistant turn now and
+        # skip the prefer/reason step.
+        if answers.get("single"):
+            single = answers["a"]
+            sa.record_interaction(
+                conn, query_group=group, original_query=query, effective_query=query,
+                answer=single["answer"], feedback=None, comment=None, attempt=1,
+                sources=single["sources"], routing=routing, session_id=sid,
+            )
+            sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
+                            role="assistant", content=single["answer"], sources=single["sources"])
+            followups = sa.suggest_followups(client, query, single["answer"])
+            return jsonify(
+                {
+                    "single": True,
+                    "group_id": group,
+                    "conversation_id": conversation_id,
+                    "original_query": query,
+                    "effective_query": query,
+                    "routing": routing,
+                    "answer": single["answer"],
+                    "sources": single["sources"],
+                    "applied_lessons": applied,
+                    "applied_count": len(applied),
+                    "followups": followups,
+                }
+            )
+
         comparison_id = sa.record_comparison(
             conn,
             query_group=group,
@@ -157,11 +234,14 @@ def api_query():
             answers=answers,
             routing=routing,
             lessons_applied=applied_ids,
+            session_id=sid,
+            conversation_id=conversation_id,
         )
         return jsonify(
             {
                 "comparison_id": comparison_id,
                 "group_id": group,
+                "conversation_id": conversation_id,
                 "original_query": query,
                 "effective_query": query,
                 "routing": routing,
@@ -215,13 +295,33 @@ def api_prefer():
             conn, query_group=comp["query_group"], original_query=comp["original_query"],
             effective_query=comp["effective_query"], answer=win_answer, feedback="up",
             comment=None, attempt=1, sources=_src(win_sources), routing=routing,
+            session_id=comp["session_id"],
         )
         sa.record_interaction(
             conn, query_group=comp["query_group"], original_query=comp["original_query"],
             effective_query=comp["effective_query"], answer=lose_answer, feedback="down",
             comment=None, attempt=2, sources=_src(lose_sources), routing=routing,
+            session_id=comp["session_id"],
         )
-        return jsonify({"status": "ok", "preferred": preferred, "metrics": metrics_payload(conn)})
+
+        # The winning answer becomes the assistant's turn in the conversation
+        # transcript — so it's part of the memory passed to future questions.
+        win_src = _src(win_sources)
+        if comp["session_id"] and comp["conversation_id"]:
+            sa.save_message(
+                conn, session_id=comp["session_id"], conversation_id=comp["conversation_id"],
+                role="assistant", content=win_answer, sources=win_src,
+            )
+
+        # Suggest 3 follow-up questions based on the winning answer (cheap Haiku).
+        followups = sa.suggest_followups(client, comp["original_query"], win_answer)
+
+        return jsonify({
+            "status": "ok",
+            "preferred": preferred,
+            "followups": followups,
+            "metrics": metrics_payload(conn),
+        })
     finally:
         conn.close()
 
@@ -250,7 +350,8 @@ def api_prefer_reason():
         sa.set_reason(conn, int(comparison_id), reason)
         topic = sa.extract_topic(comp["original_query"])
         lesson = sa.record_lesson(
-            conn, topic=topic, winning_style=comp["preferred"], reason=reason
+            conn, topic=topic, winning_style=comp["preferred"], reason=reason,
+            session_id=comp["session_id"],
         )
         return jsonify(
             {
@@ -349,12 +450,15 @@ def api_feedback():
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
-    """Clear all interactions, comparisons, and lessons — for a clean demo."""
+    """Clear ALL data (global) — interactions, comparisons, lessons, messages.
+
+    The dashboard is a global, all-session view, so the demo Reset wipes
+    everything (including every session's conversation history).
+    """
     conn = db()
     try:
-        conn.execute("DELETE FROM interactions")
-        conn.execute("DELETE FROM comparisons")
-        conn.execute("DELETE FROM lessons")
+        for table in ("interactions", "comparisons", "lessons", "messages"):
+            conn.execute(f"DELETE FROM {table}")
         conn.commit()
         return jsonify({"status": "ok", "metrics": metrics_payload(conn)})
     finally:

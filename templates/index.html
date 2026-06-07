@@ -18,6 +18,9 @@
   <div class="layout">
     <!-- Header -->
     <header class="topbar">
+      <button id="sidebarToggle" class="ghost-btn icon-btn" title="Toggle history" aria-label="Toggle history">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
       <div class="brand">
         <div class="logo">
           <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="white" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
@@ -41,6 +44,19 @@
     </header>
 
     <main class="content">
+      <!-- History sidebar -->
+      <aside id="sidebar" class="sidebar panel">
+        <button id="newChatBtn" class="new-chat-btn">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          New Chat
+        </button>
+        <div class="sidebar-label">History</div>
+        <div id="historyList" class="history-list">
+          <div class="history-empty">No conversations yet</div>
+        </div>
+      </aside>
+      <div id="sidebarScrim" class="sidebar-scrim" hidden></div>
+
       <!-- Chat -->
       <section class="chat panel">
         <div id="messages" class="messages">
