@@ -448,6 +448,46 @@ def api_feedback():
         conn.close()
 
 
+@app.route("/api/migrate", methods=["GET", "POST"])
+def api_migrate():
+    """One-time DB restore: import backup.sql into the live database.
+
+    Intended to be hit once after deploy to seed the Railway volume from the
+    committed backup.sql. Guarded by a token so it can't be triggered casually:
+    set MIGRATE_TOKEN in the environment and pass it as ?token= (or JSON
+    {"token": ...}). If MIGRATE_TOKEN is unset the endpoint is disabled.
+    """
+    expected = os.environ.get("MIGRATE_TOKEN")
+    if not expected:
+        return json_error(
+            "Migration endpoint is disabled — set MIGRATE_TOKEN to enable it.",
+            403, "forbidden",
+        )
+    data = request.get_json(silent=True) or {}
+    supplied = request.args.get("token") or data.get("token")
+    if supplied != expected:
+        return json_error("Invalid or missing migration token.", 401, "authentication_error")
+
+    backup_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backup.sql")
+    if not os.path.exists(backup_path):
+        return json_error(f"backup.sql not found at {backup_path}.", 404, "not_found_error")
+
+    with open(backup_path, "r", encoding="utf-8") as f:
+        sql_text = f.read()
+
+    conn = db()
+    try:
+        counts = sa.restore_from_sql(conn, sql_text)
+        return jsonify({
+            "status": "ok",
+            "db_path": sa.DB_PATH,
+            "imported": counts,
+            "metrics": metrics_payload(conn),
+        })
+    finally:
+        conn.close()
+
+
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     """Clear ALL data (global) — interactions, comparisons, lessons, messages.
