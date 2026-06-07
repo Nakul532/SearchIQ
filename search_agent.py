@@ -24,10 +24,62 @@ import os
 import sqlite3
 import sys
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 
 import anthropic
 
-MODEL = "claude-opus-4-8"
+# Load a local .env (if present) so ANTHROPIC_API_KEY / DB_PATH etc. can live in
+# a file instead of being exported each session. Loaded here at import time —
+# app.py imports this module, so both the web app and the CLI pick it up before
+# any environment variable is read. Real environment vars take precedence over
+# .env values (override=False), and a missing python-dotenv is non-fatal.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ModuleNotFoundError:
+    pass
+
+# --------------------------------------------------------------------------- #
+# Model routing tiers
+#
+# Pipeline: EVERY query runs web search first (always — the retrieval layer
+# never changes). A rule-based pre-processor (classify_query) then sizes the
+# query and picks which model AGGREGATES the same search results into the answer:
+#   simple  → Haiku  (factual / definitional / single facts) — fast
+#   medium  → Haiku  (comparisons / explanations / how-does-X-work) — balanced
+#   complex → Sonnet (analysis / research / multi-step reasoning / synthesis) — deep
+# Routing simple/medium queries to Haiku avoids an expensive Sonnet call on the
+# bulk of traffic; the dashboard surfaces the model mix and the cost saved.
+# --------------------------------------------------------------------------- #
+HAIKU_MODEL = "claude-haiku-4-5-20251001"   # fast, cheap
+SONNET_MODEL = "claude-sonnet-4-6"          # capable, for complex reasoning
+
+# Kept for the rephrase step (a small, cheap classification-style call).
+MODEL = HAIKU_MODEL
+
+# Per-tier routing config — model, badge icon, and the one-word "mode" label.
+TIERS = {
+    "simple":  {"model": HAIKU_MODEL,  "icon": "⚡", "mode": "Fast"},
+    "medium":  {"model": HAIKU_MODEL,  "icon": "🔍", "mode": "Balanced"},
+    "complex": {"model": SONNET_MODEL, "icon": "🧠", "mode": "Deep"},
+}
+
+# Rough per-query cost estimate, used only for the "cost saved vs always-Sonnet"
+# dashboard stat (we don't meter real tokens). Assumes a typical aggregation call
+# that includes web-search results in the prompt.
+AVG_INPUT_TOKENS = 3000
+AVG_OUTPUT_TOKENS = 800
+MODEL_PRICING = {  # USD per 1M tokens: (input, output)
+    HAIKU_MODEL: (1.0, 5.0),
+    SONNET_MODEL: (3.0, 15.0),
+}
+
+
+def estimate_query_cost(model: str) -> float:
+    """Estimated USD cost of one aggregation call on ``model`` (see notes above)."""
+    pin, pout = MODEL_PRICING.get(model, MODEL_PRICING[SONNET_MODEL])
+    return AVG_INPUT_TOKENS / 1e6 * pin + AVG_OUTPUT_TOKENS / 1e6 * pout
 
 
 def _resolve_db_path() -> str:
@@ -61,8 +113,153 @@ LESSON_CONTEXT_LIMIT = 8 # how many recent feedback lessons to feed the model
 # Anthropic's built-in server-side web search tool. Runs the search on
 # Anthropic's infrastructure, feeds results into Claude's context, and returns
 # citations — the RAG retrieval layer. GA, no beta header needed.
-WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 5}
+# allowed_callers=["direct"] disables the tool's programmatic-tool-calling
+# (dynamic-filtering) path, which Haiku 4.5 does not support — without it, a
+# Haiku request with this tool 400s. Direct calling works on every routed model.
+WEB_SEARCH_TOOL = {
+    "type": "web_search_20260209",
+    "name": "web_search",
+    "max_uses": 5,
+    "allowed_callers": ["direct"],
+}
 MAX_SOURCES = 8          # cap how many sources we surface per answer
+
+
+# --------------------------------------------------------------------------- #
+# Query pre-processor — rule-based complexity classifier + model router
+# --------------------------------------------------------------------------- #
+# Signal words, checked in priority order (complex beats medium beats simple).
+# Lower-cased substring matching against the query.
+_COMPLEX_SIGNALS = (
+    "analyze", "analyse", "analysis", "evaluate", "assess", "research",
+    "implication", "impact of", "consequence", "pros and cons", "trade-off",
+    "tradeoff", "compare and contrast", "in depth", "step by step", "step-by-step",
+    "strategy", "architect", "design a", "design an", "framework for",
+    "why does", "why do", "why is", "why are", "how would", "what would happen",
+    "deep dive", "critique", "synthesize", "synthesis", "rank ", "recommend",
+    "news", "latest news",  # news synthesis is a deep, multi-source task
+)
+_MEDIUM_SIGNALS = (
+    "compare", "difference between", "vs ", " vs.", "versus", "explain",
+    "how do", "how does", "how to", "how can", "latest", "current", "today",
+    "recent", "this year", "update", "best ", "should i", "review",
+    "guide", "tutorial", "examples of", "trends",
+    # Live-data lookups — short, but a balanced (vs simple) framing fits better.
+    "price", "stock", "weather", "score", "near me", "schedule", "release date",
+)
+_SIMPLE_STARTS = (
+    "what is", "what's", "whats", "who is", "who's", "who was", "when is",
+    "when did", "when was", "where is", "where was", "define", "definition of",
+    "capital of", "how many", "how much", "what year", "what time", "meaning of",
+)
+
+
+def classify_query(query: str) -> dict:
+    """Rule-based pre-processor: size a query and pick the AGGREGATION model.
+
+    Web search always runs (the retrieval layer never changes) — this only
+    decides which model turns the same search results into the answer. No API
+    call; uses length, question words, and signal phrases. Returns a routing
+    dict (see build_routing). Priority: complex > medium > simple > fallback.
+    """
+    q = (query or "").lower().strip()
+    word_count = len(q.split())
+
+    def has(signals: tuple[str, ...]) -> bool:
+        return any(s in q for s in signals)
+
+    # Complex: analysis / research / multi-step reasoning, "why", news synthesis,
+    # or a long multi-part question.
+    if has(_COMPLEX_SIGNALS) or word_count > 24 or q.count("?") > 1:
+        complexity = "complex"
+    # Medium: comparisons, explanations, "how does X work", "difference between".
+    elif has(_MEDIUM_SIGNALS):
+        complexity = "medium"
+    # Simple: short factual/definitional lookups, "what is X", "who is X".
+    elif q.startswith(_SIMPLE_STARTS) or word_count <= 6:
+        complexity = "simple"
+    # Fallback: when in doubt, the balanced tier.
+    else:
+        complexity = "medium"
+
+    return build_routing(complexity)
+
+
+def build_routing(complexity: str) -> dict:
+    """Assemble a routing dict (model + UI badge) from a complexity tier.
+
+    Web search is always on; the badge encodes tier, model, and mode, e.g.
+    "⚡ Simple · Haiku · Fast" / "🔍 Medium · Haiku · Balanced" /
+    "🧠 Complex · Sonnet · Deep".
+    """
+    tier = TIERS.get(complexity, TIERS["medium"])
+    model = tier["model"]
+    model_label = "Sonnet" if model.startswith("claude-sonnet") else "Haiku"
+    badge = f"{tier['icon']} {complexity.capitalize()} · {model_label} · {tier['mode']}"
+    return {
+        "complexity": complexity,
+        "model": model,
+        "web_search": True,        # always — retrieval layer is constant
+        "model_label": model_label,
+        "mode": tier["mode"],
+        "icon": tier["icon"],
+        "badge": badge,
+    }
+
+
+def _reasoning_kwargs(model: str) -> dict:
+    """Per-model thinking/effort params.
+
+    Adaptive thinking and the effort parameter are supported on Sonnet 4.6 (and
+    Opus) but ERROR on Haiku 4.5 — so only attach them for Sonnet. Haiku runs
+    plain, which is exactly what the cheap/fast tier wants.
+    """
+    if model.startswith("claude-sonnet"):
+        return {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}}
+    return {}
+
+
+# --------------------------------------------------------------------------- #
+# Clarifying questions — disambiguate vague queries before answering
+# --------------------------------------------------------------------------- #
+# Generic "vague" terms that signal an under-specified query.
+_VAGUE_TERMS = {"best", "good", "top", "help", "recommend", "recommendation",
+                "recommendations", "tips", "advice", "ideas", "options"}
+# Category → clarifying chips. First matching category wins; else a generic set.
+_CLARIFY_CATEGORIES = [
+    (("tool", "tools", "software", "app", "apps", "platform", "framework",
+      "library", "stack", "service"),
+     ["For what purpose?", "Free or paid?", "For a team or individual?"]),
+    (("learn", "study", "course", "tutorial", "book", "books"),
+     ["What's your current level?", "For work or personal?", "How much time do you have?"]),
+    (("buy", "cheap", "budget", "price", "phone", "laptop", "car", "gift"),
+     ["What's your budget?", "What will you use it for?", "Any must-have features?"]),
+    (("help", "advice", "tips", "ideas"),
+     ["What are you trying to do?", "What have you tried so far?", "What's the context?"]),
+]
+_CLARIFY_DEFAULT = ["What's the context?", "What are you trying to achieve?", "Any specific requirements?"]
+
+
+def clarifying_questions(query: str) -> list[str]:
+    """Return 2-3 clarifying chips if the query is ambiguous, else an empty list.
+
+    Ambiguous = very short (≤3 words) or a vague generic term in a short query.
+    Specific multi-word queries (even with 'best') are left alone. Chips are
+    chosen contextually from the query's category.
+    """
+    q = (query or "").lower().strip()
+    words = [w.strip(".,!?\"'()") for w in q.split()]
+    word_count = len(words)
+    has_vague = any(w in _VAGUE_TERMS for w in words)
+
+    ambiguous = word_count <= 3 or (has_vague and word_count <= 4)
+    if not ambiguous:
+        return []
+
+    for keywords, chips in _CLARIFY_CATEGORIES:
+        if any(w in keywords for w in words):
+            return chips
+    return _CLARIFY_DEFAULT
 
 
 def sanitize_env_secret(name: str) -> str | None:
@@ -104,10 +301,47 @@ def init_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    # Migration: add the sources column to pre-existing databases.
+    # Migration: add columns to pre-existing databases.
     cols = [r[1] for r in conn.execute("PRAGMA table_info(interactions)")]
     if "sources" not in cols:
         conn.execute("ALTER TABLE interactions ADD COLUMN sources TEXT")  # JSON list of {url,title}
+    if "routing" not in cols:
+        conn.execute("ALTER TABLE interactions ADD COLUMN routing TEXT")  # JSON routing decision
+
+    # A/B answer comparisons — two answers per query, plus the user's preference.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS comparisons (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            query_group     INTEGER NOT NULL,
+            original_query  TEXT    NOT NULL,
+            effective_query TEXT    NOT NULL,  -- after a clarifying chip is appended
+            answer_a        TEXT    NOT NULL,
+            answer_b        TEXT    NOT NULL,
+            sources_a       TEXT,              -- JSON list of {url,title}
+            sources_b       TEXT,
+            routing         TEXT,              -- JSON routing decision (model used)
+            preferred       TEXT,              -- 'A' | 'B' | NULL (not yet chosen)
+            reason          TEXT,              -- why the user preferred it
+            lessons_applied TEXT,              -- JSON list of lesson ids applied here
+            created_at      TEXT    NOT NULL
+        )
+        """
+    )
+    # Lessons the system has learned from preferences — the visible learning loop.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lessons (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic         TEXT    NOT NULL,   -- extracted query topic ('tools', 'python', …)
+            winning_style TEXT    NOT NULL,   -- 'A' (concise) | 'B' (detailed)
+            reason        TEXT,               -- 'more accurate' | 'clearer explanation' | 'better sources'
+            text          TEXT    NOT NULL,   -- plain-English lesson shown in the UI
+            applied_count INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT    NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -127,13 +361,14 @@ def record_interaction(
     comment: str | None,
     attempt: int,
     sources: list[dict] | None = None,
+    routing: dict | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO interactions
             (query_group, original_query, effective_query, answer,
-             feedback, comment, attempt, created_at, sources)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             feedback, comment, attempt, created_at, sources, routing)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             query_group,
@@ -145,6 +380,7 @@ def record_interaction(
             attempt,
             _dt.datetime.now().isoformat(timespec="seconds"),
             json.dumps(sources or []),
+            json.dumps(routing) if routing else None,
         ),
     )
     conn.commit()
@@ -159,6 +395,7 @@ def insert_answer(
     answer: str,
     attempt: int,
     sources: list[dict] | None = None,
+    routing: dict | None = None,
 ) -> int:
     """Insert an answer (with its web sources) with no feedback yet; return row id.
 
@@ -168,8 +405,8 @@ def insert_answer(
         """
         INSERT INTO interactions
             (query_group, original_query, effective_query, answer,
-             feedback, comment, attempt, created_at, sources)
-        VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+             feedback, comment, attempt, created_at, sources, routing)
+        VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)
         """,
         (
             query_group,
@@ -179,6 +416,7 @@ def insert_answer(
             attempt,
             _dt.datetime.now().isoformat(timespec="seconds"),
             json.dumps(sources or []),
+            json.dumps(routing) if routing else None,
         ),
     )
     conn.commit()
@@ -242,12 +480,224 @@ def recent_lessons(conn: sqlite3.Connection, limit: int = LESSON_CONTEXT_LIMIT) 
 
 
 # --------------------------------------------------------------------------- #
+# A/B comparisons + the visible learning loop
+# --------------------------------------------------------------------------- #
+_STOPWORDS = {
+    "the", "a", "an", "of", "for", "to", "in", "on", "and", "or", "is", "are",
+    "what", "which", "who", "whom", "whose", "how", "why", "when", "where",
+    "best", "good", "top", "vs", "versus", "between", "difference", "compare",
+    "should", "can", "do", "does", "i", "my", "me", "we", "you", "your", "with",
+    "about", "explain", "tell", "give", "list", "some", "any", "this", "that",
+    "it", "be", "use", "using", "vs.", "&",
+}
+# Plain-English descriptions used to phrase a learned lesson.
+_STYLE_DESC = {
+    "A": "concise, factual",
+    "B": "detailed, analytical",
+}
+_OTHER_STYLE_DESC = {
+    "A": "long, detailed ones",
+    "B": "brief summaries",
+}
+_REASON_DESC = {
+    "more accurate": "they were more accurate",
+    "clearer explanation": "they explained things more clearly",
+    "better sources": "they had better sources",
+}
+
+
+def extract_topic(query: str) -> str:
+    """Pull a short topic keyword from a query (for matching lessons to queries).
+
+    Strips question words / stopwords and returns the most salient remaining
+    word, e.g. "best tools for python" -> "tools". Falls back to the whole
+    (trimmed) query when nothing salient remains.
+    """
+    words = [w.strip(".,!?\"'()") for w in (query or "").lower().split()]
+    salient = [w for w in words if w and w not in _STOPWORDS and len(w) > 2]
+    return salient[0] if salient else (query or "").lower().strip()[:40]
+
+
+def record_comparison(
+    conn: sqlite3.Connection,
+    *,
+    query_group: int,
+    original_query: str,
+    effective_query: str,
+    answers: dict,
+    routing: dict,
+    lessons_applied: list[int],
+) -> int:
+    """Persist a freshly generated A/B pair (no preference yet); return its id."""
+    cur = conn.execute(
+        """
+        INSERT INTO comparisons
+            (query_group, original_query, effective_query, answer_a, answer_b,
+             sources_a, sources_b, routing, preferred, reason, lessons_applied, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+        """,
+        (
+            query_group,
+            original_query,
+            effective_query,
+            answers["a"]["answer"],
+            answers["b"]["answer"],
+            json.dumps(answers["a"]["sources"]),
+            json.dumps(answers["b"]["sources"]),
+            json.dumps(routing),
+            json.dumps(lessons_applied or []),
+            _dt.datetime.now().isoformat(timespec="seconds"),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_comparison(conn: sqlite3.Connection, comparison_id: int) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT id, query_group, original_query, effective_query, answer_a, answer_b,
+               sources_a, sources_b, routing, preferred, reason
+        FROM comparisons WHERE id = ?
+        """,
+        (comparison_id,),
+    ).fetchone()
+    if not row:
+        return None
+    keys = ["id", "query_group", "original_query", "effective_query", "answer_a",
+            "answer_b", "sources_a", "sources_b", "routing", "preferred", "reason"]
+    return dict(zip(keys, row))
+
+
+def set_preference(conn: sqlite3.Connection, comparison_id: int, preferred: str) -> None:
+    conn.execute(
+        "UPDATE comparisons SET preferred = ? WHERE id = ?", (preferred, comparison_id)
+    )
+    conn.commit()
+
+
+def set_reason(conn: sqlite3.Connection, comparison_id: int, reason: str) -> None:
+    conn.execute(
+        "UPDATE comparisons SET reason = ? WHERE id = ?", (reason, comparison_id)
+    )
+    conn.commit()
+
+
+def format_lesson(topic: str, winning_style: str, reason: str | None) -> str:
+    """Phrase a plain-English lesson from a recorded preference."""
+    win = _STYLE_DESC.get(winning_style, "detailed, analytical")
+    other = _OTHER_STYLE_DESC.get(winning_style, "the alternative")
+    text = f"For questions about {topic}, {win} answers are preferred over {other}"
+    why = _REASON_DESC.get((reason or "").lower())
+    if why:
+        text += f" — {why}"
+    return text + "."
+
+
+def record_lesson(
+    conn: sqlite3.Connection, *, topic: str, winning_style: str, reason: str | None
+) -> dict:
+    """Create a lesson from a preference, or reinforce an existing matching one.
+
+    If a lesson already exists for the same topic + winning style, its reason is
+    refreshed rather than creating a duplicate. Returns the lesson as a dict.
+    """
+    existing = conn.execute(
+        "SELECT id FROM lessons WHERE topic = ? AND winning_style = ?",
+        (topic, winning_style),
+    ).fetchone()
+    text = format_lesson(topic, winning_style, reason)
+    if existing:
+        lesson_id = int(existing[0])
+        conn.execute(
+            "UPDATE lessons SET reason = ?, text = ? WHERE id = ?",
+            (reason, text, lesson_id),
+        )
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO lessons (topic, winning_style, reason, text, applied_count, created_at)
+            VALUES (?, ?, ?, ?, 0, ?)
+            """,
+            (topic, winning_style, reason, text, _dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        lesson_id = int(cur.lastrowid)
+    conn.commit()
+    return {"id": lesson_id, "topic": topic, "text": text, "winning_style": winning_style}
+
+
+def match_lessons(conn: sqlite3.Connection, query: str, limit: int = 5) -> list[dict]:
+    """Return lessons relevant to a query — those whose topic appears in it.
+
+    This is how a winning style becomes the preferred pattern for SIMILAR future
+    queries. Returns dicts {id, text, topic}, most-recently-learned first.
+    """
+    q = (query or "").lower()
+    rows = conn.execute(
+        "SELECT id, topic, text FROM lessons ORDER BY id DESC"
+    ).fetchall()
+    matched = [
+        {"id": int(i), "topic": t, "text": txt}
+        for (i, t, txt) in rows
+        if t and t in q
+    ]
+    return matched[:limit]
+
+
+def bump_applied_count(conn: sqlite3.Connection, lesson_ids: list[int]) -> None:
+    """Increment how many times each lesson has been applied to an answer."""
+    if not lesson_ids:
+        return
+    conn.executemany(
+        "UPDATE lessons SET applied_count = applied_count + 1 WHERE id = ?",
+        [(int(i),) for i in lesson_ids],
+    )
+    conn.commit()
+
+
+def all_lessons(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    """Return the lessons feed for the dashboard, most-recently-learned first."""
+    rows = conn.execute(
+        """
+        SELECT id, text, topic, applied_count, created_at
+        FROM lessons ORDER BY id DESC LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [
+        {"id": int(i), "text": txt, "topic": t, "applied_count": int(ac), "created_at": ca}
+        for (i, txt, t, ac, ca) in rows
+    ]
+
+
+def training_progress(conn: sqlite3.Connection) -> dict:
+    """Totals for the Training Progress stat: lessons learned + times applied."""
+    learned = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+    applied = conn.execute("SELECT COALESCE(SUM(applied_count), 0) FROM lessons").fetchone()[0]
+    return {"lessons_learned": int(learned), "lessons_applied": int(applied)}
+
+
+# --------------------------------------------------------------------------- #
 # Claude calls
 # --------------------------------------------------------------------------- #
-def build_system_prompt(lessons: list[str]) -> str:
+# A/B answer styles — both web-grounded, but two distinct synthesis approaches
+# the user compares side by side.
+STYLE_A = (
+    "STYLE — FACTUAL & CONCISE: Lead with the direct answer in the first sentence. "
+    "Keep it tight and skimmable: short paragraphs or a few bullet points, only the "
+    "key facts, no filler. Aim for brevity over breadth."
+)
+STYLE_B = (
+    "STYLE — DETAILED & ANALYTICAL: Give a thorough, well-structured answer. Add "
+    "context, compare options, note trade-offs and caveats, and explain the 'why' "
+    "behind the facts. Use headings or bullet lists where they aid clarity."
+)
+
+
+def build_system_prompt(lessons: list[str], style: str | None = None) -> str:
     base = (
         "You are a precise search-answer assistant. Given a user's search query, "
-        "produce a direct, well-structured, factual answer. Be concise but complete. "
+        "produce a direct, well-structured, factual answer. "
         "If the query is ambiguous, answer the most likely intent and note the assumption. "
         "Respond directly without preamble like 'Here is' or 'Sure'.\n\n"
         "GROUNDING REQUIREMENT: You have a web_search tool and you MUST use it on "
@@ -261,11 +711,13 @@ def build_system_prompt(lessons: list[str]) -> str:
         "build your answer, use your own knowledge only to add light context around "
         "the sourced facts, and cite the sources you used."
     )
+    if style:
+        base += "\n\n" + style
     if lessons:
         joined = "\n".join(f"- {lesson}" for lesson in lessons)
         base += (
-            "\n\nLessons learned from past user feedback — apply these to avoid "
-            f"repeating mistakes:\n{joined}"
+            "\n\nLessons learned from past user preferences — these reflect what users "
+            f"liked about previous answers, so apply them here:\n{joined}"
         )
     return base
 
@@ -304,24 +756,29 @@ def search_and_answer(
     client: anthropic.Anthropic,
     query: str,
     lessons: list[str],
+    routing: dict,
+    style: str | None = None,
     on_text=None,
 ) -> tuple[str, list[dict]]:
-    """Answer a query with web-search RAG.
+    """Answer a query with web-search RAG, aggregated by the routed model.
 
-    Claude searches the web (server-side) when the query needs live information,
-    blends results with its own knowledge, and cites sources. Returns
+    Web search ALWAYS runs (same retrieval for every query) — ``routing`` (from
+    classify_query) only selects which model aggregates the results into the
+    answer: Haiku for simple/medium, Sonnet for complex. ``style`` (STYLE_A /
+    STYLE_B) tunes the synthesis approach for A/B comparison. Returns
     (answer_text, sources). If ``on_text`` is given, text chunks are streamed to
     it as they arrive (used by the terminal for live output).
     """
-    with client.messages.stream(
-        model=MODEL,
+    kwargs = dict(
+        model=routing["model"],
         max_tokens=8000,
-        thinking={"type": "adaptive"},
-        output_config={"effort": "medium"},
-        system=build_system_prompt(lessons),
+        system=build_system_prompt(lessons, style=style),
         tools=[WEB_SEARCH_TOOL],
         messages=[{"role": "user", "content": query}],
-    ) as stream:
+        **_reasoning_kwargs(routing["model"]),
+    )
+
+    with client.messages.stream(**kwargs) as stream:
         for text in stream.text_stream:
             if on_text:
                 on_text(text)
@@ -329,6 +786,27 @@ def search_and_answer(
 
     answer = "".join(b.text for b in final.content if b.type == "text").strip()
     return answer, extract_sources(final)
+
+
+def generate_ab_answers(
+    client: anthropic.Anthropic, query: str, lessons: list[str], routing: dict
+) -> dict:
+    """Generate two web-grounded answers in parallel for side-by-side comparison.
+
+    Answer A is factual & concise; Answer B is detailed & analytical. Both run
+    web search with the routed model; running them on threads keeps total latency
+    close to a single answer (the calls are I/O-bound on the API). Returns
+    {"a": {answer, sources}, "b": {answer, sources}}.
+    """
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_a = pool.submit(search_and_answer, client, query, lessons, routing, STYLE_A)
+        fut_b = pool.submit(search_and_answer, client, query, lessons, routing, STYLE_B)
+        ans_a, src_a = fut_a.result()
+        ans_b, src_b = fut_b.result()
+    return {
+        "a": {"answer": ans_a, "sources": src_a},
+        "b": {"answer": ans_b, "sources": src_b},
+    }
 
 
 def regenerate_answer(
@@ -378,13 +856,13 @@ def regenerate_answer(
         "faithful to the gathered information above. Do not search again."
     )
 
+    # Retries improve an answer the user rejected, so use the capable model.
     with client.messages.stream(
-        model=MODEL,
+        model=SONNET_MODEL,
         max_tokens=4000,
-        thinking={"type": "adaptive"},
-        output_config={"effort": "medium"},
         system=system,
         messages=[{"role": "user", "content": user}],
+        **_reasoning_kwargs(SONNET_MODEL),
     ) as stream:
         for text in stream.text_stream:
             if on_text:
@@ -423,12 +901,12 @@ def rephrase_query(
         f"User's complaint: {complaint}\n"
         f"Previous answer (which fell short):\n{failed_answer[:1500]}"
     )
+    # A small rewriting task — the cheap model handles it well.
     resp = client.messages.create(
         model=MODEL,
         max_tokens=300,
-        thinking={"type": "adaptive"},
-        output_config={"effort": "low"},
         messages=[{"role": "user", "content": prompt}],
+        **_reasoning_kwargs(MODEL),
     )
     text = next((b.text for b in resp.content if b.type == "text"), "").strip()
     return text or original_query
@@ -461,14 +939,18 @@ def compute_metrics(conn: sqlite3.Connection) -> dict:
     """Compute query-group-level metrics for the dashboard."""
     rows = conn.execute(
         """
-        SELECT query_group, original_query, attempt, feedback
+        SELECT query_group, original_query, attempt, feedback, routing
         FROM interactions
         ORDER BY query_group, attempt
         """
     ).fetchall()
 
     groups: dict[int, dict] = {}
-    for group, original, attempt, feedback in rows:
+    # Per-model-call tallies (every interaction is one aggregation call).
+    models_used = {"Haiku": 0, "Sonnet": 0}
+    cost_actual = 0.0       # estimated $ actually spent on aggregation calls
+    cost_all_sonnet = 0.0   # estimated $ had we always used Sonnet
+    for group, original, attempt, feedback, routing in rows:
         g = groups.setdefault(
             group,
             {"original": original, "first_feedback": None, "best_feedback": None},
@@ -480,7 +962,22 @@ def compute_metrics(conn: sqlite3.Connection) -> dict:
         elif feedback == "down" and g["best_feedback"] is None:
             g["best_feedback"] = "down"
 
+        # Model-mix + cost accounting across every aggregation call.
+        if routing:
+            try:
+                rt = json.loads(routing)
+            except (json.JSONDecodeError, TypeError):
+                rt = None
+            if rt:
+                model = rt.get("model") or SONNET_MODEL
+                label = "Sonnet" if model.startswith("claude-sonnet") else "Haiku"
+                models_used[label] = models_used.get(label, 0) + 1
+                cost_actual += estimate_query_cost(model)
+                cost_all_sonnet += estimate_query_cost(SONNET_MODEL)
+
     total_queries = len(groups)
+    # Estimated $ saved by routing to Haiku vs. always using Sonnet.
+    cost_saved_usd = round(cost_all_sonnet - cost_actual, 4)
     # Only count queries that received any feedback toward the completion rate.
     rated = [g for g in groups.values() if g["best_feedback"] is not None]
     completed = [g for g in rated if g["best_feedback"] == "up"]
@@ -498,6 +995,8 @@ def compute_metrics(conn: sqlite3.Connection) -> dict:
         "rated_queries": len(rated),
         "completion_rate": completion_rate,
         "most_improved": most_improved,
+        "models_used": models_used,
+        "cost_saved_usd": cost_saved_usd,
     }
 
 
@@ -512,6 +1011,9 @@ def show_dashboard(conn: sqlite3.Connection) -> None:
     print("=" * 56)
     print(f"  Total queries handled : {m['total_queries']}")
     print(f"  Queries with feedback : {m['rated_queries']}")
+    mu = m["models_used"]
+    print(f"  🤖 Models used        : Haiku {mu.get('Haiku', 0)} · Sonnet {mu.get('Sonnet', 0)}")
+    print(f"  💰 Est. cost saved    : ${m['cost_saved_usd']:.4f}  (vs always Sonnet)")
     print("\n  ★ NORTH STAR — Task Completion Rate")
     print(f"    [{bar}] {m['completion_rate']:.1f}%")
     print("    (% of rated queries that earned a thumbs up)")
@@ -534,14 +1036,18 @@ def handle_query(
     group = next_query_group(conn)
     _stream = lambda t: print(t, end="", flush=True)  # noqa: E731
 
-    # First attempt: a real web search. Retries reuse THESE results (no re-search).
+    # Pre-process: size the query and pick the model + tools before calling Claude.
+    routing = classify_query(original_query)
+    print(f"\n🧭 Routing: {routing['badge']}")
     print("\n🔎 Searching the web…\n\nAnswer:\n")
     answer, sources = search_and_answer(
-        client, original_query, recent_lessons(conn), on_text=_stream
+        client, original_query, recent_lessons(conn), routing, on_text=_stream
     )
     print("\n")
     print_sources(sources)
     effective_query = original_query
+    # Retries improve a rejected answer with the capable model, reusing sources.
+    retry_routing = build_routing("complex")
 
     for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
         feedback, comment = collect_feedback()
@@ -555,6 +1061,7 @@ def handle_query(
             comment=comment,
             attempt=attempt,
             sources=sources,
+            routing=routing if attempt == 1 else retry_routing,
         )
 
         if feedback != "down":
@@ -573,7 +1080,8 @@ def handle_query(
             failed_answer=answer,
             comment=comment,
         )
-        print(f'  Improved framing → "{effective_query}"\n\nAnswer:\n')
+        print(f'  Improved framing → "{effective_query}"')
+        print(f"  🧭 Routing: {retry_routing['badge']}\n\nAnswer:\n")
         answer = regenerate_answer(
             client,
             original_query=original_query,

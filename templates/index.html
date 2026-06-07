@@ -51,12 +51,12 @@
               </svg>
             </div>
             <h2>Ask anything</h2>
-            <p>SearchIQ searches the web in real time, blends it with reasoning, and
-               learns from your feedback — getting sharper with every query.</p>
+            <p>SearchIQ searches the web, drafts <b>two answers</b> for you to compare,
+               and learns your preferences — getting sharper with every pick.</p>
             <div class="suggestions">
               <button class="chip">What is the capital of Australia?</button>
-              <button class="chip">Best database for a Python side project</button>
               <button class="chip">Latest news on AI regulation</button>
+              <button class="chip">best tools</button>
             </div>
           </div>
         </div>
@@ -98,6 +98,46 @@
             <div class="stat-value accent" id="improvedCount">0</div>
             <div class="stat-label">Improved</div>
           </div>
+        </div>
+
+        <div class="card routing-card">
+          <div class="card-label">⚙️ Routing economics</div>
+          <div class="models-split">
+            <div class="model-stat haiku">
+              <div class="model-count" id="haikuCount">0</div>
+              <div class="model-name">⚡ Haiku</div>
+            </div>
+            <div class="model-stat sonnet">
+              <div class="model-count" id="sonnetCount">0</div>
+              <div class="model-name">🧠 Sonnet</div>
+            </div>
+          </div>
+          <div class="cost-saved-row">
+            <span class="cs-icon">💰</span>
+            <span class="cs-value" id="costSaved">$0.00</span>
+            <span class="cs-label">saved vs always-Sonnet</span>
+          </div>
+        </div>
+
+        <div class="card training-card">
+          <div class="card-label">🎓 Training progress</div>
+          <div class="training-split">
+            <div class="training-stat">
+              <div class="training-count" id="lessonsLearned">0</div>
+              <div class="training-name">Lessons learned</div>
+            </div>
+            <div class="training-stat">
+              <div class="training-count accent" id="lessonsApplied">0</div>
+              <div class="training-name">Lessons applied</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-label">📚 Lessons learned <span class="muted">(live)</span></div>
+          <ul id="lessonsFeed" class="lessons-feed">
+            <li class="empty">No lessons yet — pick a winner to teach SearchIQ</li>
+          </ul>
         </div>
 
         <div class="card">

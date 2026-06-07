@@ -13,7 +13,22 @@
       "Bash(node --check static/app.js)",
       "Bash(node -e \"require\\('jsdom'\\); console.log\\('jsdom available'\\)\")",
       "Bash(npm install *)",
-      "Bash(node -e \"require\\('jsdom'\\); console.log\\('jsdom ready'\\)\")"
+      "Bash(node -e \"require\\('jsdom'\\); console.log\\('jsdom ready'\\)\")",
+      "Bash(python3 -m py_compile app.py)",
+      "Bash(PORT=8123 ANTHROPIC_API_KEY=dummy python3 -c ' *)",
+      "Bash(python3 -c \"import gunicorn, sys; print\\('gunicorn', gunicorn.__version__, '| py', sys.version.split\\(\\)[0]\\)\")",
+      "Bash(PORT=8200 ANTHROPIC_API_KEY=dummy timeout 3 python3 -m gunicorn app:app --bind 0.0.0.0:8200 --workers 1 --threads 2)",
+      "Bash(python3 -m py_compile search_agent.py app.py)",
+      "Bash(python3 -c \"import search_agent as sa; print\\(sa.DB_PATH\\)\")",
+      "Bash(DB_PATH=/tmp/sa_demo/custom.db python3 -c ' *)",
+      "Bash(RAILWAY_VOLUME_MOUNT_PATH=/tmp/sa_vol python3 -c ' *)",
+      "Bash(DB_PATH=/tmp/sa_demo/win.db RAILWAY_VOLUME_MOUNT_PATH=/tmp/sa_vol python3 -c \"import search_agent as sa; print\\(sa.DB_PATH\\)\")",
+      "Bash(command -v railway)",
+      "Bash(git rm *)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'Add Railway deploy config \\(gunicorn, volume-aware DB\\) *)",
+      "Bash(git push *)",
+      "Bash(cd *)"
     ]
   }
 }
