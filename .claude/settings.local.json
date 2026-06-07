@@ -31,7 +31,9 @@
       "Bash(cd *)",
       "Bash(python3 *)",
       "Bash(pkill -f \"python3 app.py\")",
-      "Bash(rm -f /tmp/searchiq_mem*.log)"
+      "Bash(rm -f /tmp/searchiq_mem*.log)",
+      "Bash(RAILWAY_VOLUME_MOUNT_PATH=/data python3 -c \"import search_agent as sa; print\\('   DB_PATH =', sa.DB_PATH\\)\")",
+      "Bash(DB_PATH=/data/custom.db RAILWAY_VOLUME_MOUNT_PATH=/data python3 -c \"import search_agent as sa; print\\('   DB_PATH =', sa.DB_PATH\\)\")"
     ]
   }
 }
