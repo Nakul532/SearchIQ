@@ -369,6 +369,42 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# The app's data tables — used by restore_from_sql to clear the DB before a
+# full import (the backup is a sqlite `.dump`, whose CREATE TABLE statements
+# would otherwise collide with init_db's tables).
+DATA_TABLES = ("interactions", "comparisons", "lessons", "messages")
+
+
+def restore_from_sql(conn: sqlite3.Connection, sql_text: str) -> dict[str, int]:
+    """Restore the database from a sqlite `.dump` script (e.g. backup.sql).
+
+    Drops the existing app tables, then replays the dump so the data matches the
+    backup exactly. Returns a row count per table after the import. Idempotent:
+    running it twice yields the same final state.
+    """
+    # Drop first so the dump's CREATE TABLE statements don't hit "table exists".
+    conn.execute("PRAGMA foreign_keys=OFF")
+    for table in DATA_TABLES:
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+    conn.commit()
+
+    # executescript() commits any pending transaction, then runs the whole dump
+    # (which wraps its INSERTs in its own BEGIN/COMMIT).
+    conn.executescript(sql_text)
+    conn.commit()
+
+    # Re-apply column migrations in case the dump predates a newer column.
+    init_db(conn)
+
+    counts: dict[str, int] = {}
+    for table in DATA_TABLES:
+        try:
+            counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        except sqlite3.OperationalError:
+            counts[table] = 0
+    return counts
+
+
 def next_query_group(conn: sqlite3.Connection) -> int:
     row = conn.execute("SELECT COALESCE(MAX(query_group), 0) FROM interactions").fetchone()
     return int(row[0]) + 1
