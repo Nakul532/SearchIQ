@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sqlite3
+from datetime import timedelta
+from functools import wraps
 
 import anthropic
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask import (Flask, Response, jsonify, redirect, render_template, request,
+                   session, stream_with_context, url_for)
 from werkzeug.exceptions import HTTPException
 
 import search_agent as sa
@@ -30,6 +34,40 @@ sa.sanitize_env_secret("ANTHROPIC_AUTH_TOKEN")
 
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=_API_KEY) if _API_KEY else anthropic.Anthropic()
+
+# --------------------------------------------------------------------------- #
+# Auth: Google sign-in (Authlib) + a 2-week signed-cookie session
+# --------------------------------------------------------------------------- #
+# The session cookie carries the logged-in user; it must be signed. Set
+# FLASK_SECRET_KEY in production — a per-boot random key is used otherwise (which
+# silently logs everyone out on restart), with a warning.
+_SECRET = os.environ.get("FLASK_SECRET_KEY")
+if not _SECRET:
+    _SECRET = secrets.token_hex(32)
+    print("Warning: FLASK_SECRET_KEY is not set — using a random key (sessions reset on "
+          "restart). Set FLASK_SECRET_KEY for persistent 2-week logins.")
+app.secret_key = _SECRET
+app.permanent_session_lifetime = timedelta(days=14)  # 2-week persistent login
+
+_GOOGLE_CLIENT_ID = (os.environ.get("GOOGLE_CLIENT_ID") or "").strip()
+_GOOGLE_CLIENT_SECRET = (os.environ.get("GOOGLE_CLIENT_SECRET") or "").strip()
+OAUTH_CONFIGURED = bool(_GOOGLE_CLIENT_ID and _GOOGLE_CLIENT_SECRET)
+
+oauth = None
+google = None
+if OAUTH_CONFIGURED:
+    from authlib.integrations.flask_client import OAuth
+    oauth = OAuth(app)
+    google = oauth.register(
+        name="google",
+        client_id=_GOOGLE_CLIENT_ID,
+        client_secret=_GOOGLE_CLIENT_SECRET,
+        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid email profile"},
+    )
+else:
+    print("Warning: GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET not set — Google sign-in is "
+          "disabled. Set both to enable login.")
 
 
 # --------------------------------------------------------------------------- #
@@ -81,33 +119,119 @@ def db() -> sqlite3.Connection:
     return conn
 
 
+def current_user() -> dict | None:
+    """The signed-in user dict ({google_id,name,email,picture}) from the session."""
+    return session.get("user")
+
+
 def session_id() -> str | None:
-    """The per-browser session id sent in the X-Session-Id header (or None)."""
-    return (request.headers.get("X-Session-Id") or "").strip() or None
+    """Identity for all per-user data: the authenticated user's google_id (or None)."""
+    user = current_user()
+    return user.get("google_id") if user else None
 
 
-def metrics_payload(conn: sqlite3.Connection) -> dict:
-    """Build the GLOBAL dashboard payload (all sessions, all time)."""
-    m = sa.compute_metrics(conn)
-    rows = conn.execute(
-        """
-        SELECT feedback FROM interactions
-        WHERE feedback IS NOT NULL
-        ORDER BY id DESC LIMIT 20
-        """
-    ).fetchall()
+def require_login(fn):
+    """API guard: return 401 JSON when the request isn't authenticated."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not session_id():
+            return json_error("Login required.", 401, "auth_required")
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def metrics_payload(conn: sqlite3.Connection, sid: str | None) -> dict:
+    """Build the dashboard payload scoped to one user (all their data, all time)."""
+    m = sa.compute_metrics(conn, sid)
+    if sid is None:
+        rows = conn.execute(
+            "SELECT feedback FROM interactions WHERE feedback IS NOT NULL ORDER BY id DESC LIMIT 20"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT feedback FROM interactions WHERE feedback IS NOT NULL AND session_id = ? "
+            "ORDER BY id DESC LIMIT 20",
+            (sid,),
+        ).fetchall()
     recent = [r[0] for r in rows][::-1]  # oldest → newest
     m["recent_feedback"] = recent
     m["thumbs_up"] = recent.count("up")
     m["thumbs_down"] = recent.count("down")
     m["improved_count"] = len(m["most_improved"])
-    # Visible learning loop: lessons feed + training-progress totals (global).
-    m["lessons_feed"] = sa.all_lessons(conn)
-    m["training_progress"] = sa.training_progress(conn)
-    # Reinforcement-learning reward signals + the current learned policy.
-    m["reward"] = sa.reward_stats(conn)
-    m["policy"] = sa.current_policy(conn)
+    # Visible learning loop: the user's lessons feed + training-progress totals.
+    m["lessons_feed"] = sa.all_lessons(conn, session_id=sid)
+    m["training_progress"] = sa.training_progress(conn, sid)
+    # Reinforcement-learning reward signals + the user's current learned policy.
+    m["reward"] = sa.reward_stats(conn, sid)
+    m["policy"] = sa.current_policy(conn, sid)
     return m
+
+
+# --------------------------------------------------------------------------- #
+# Auth routes
+# --------------------------------------------------------------------------- #
+@app.route("/login")
+def login():
+    if session_id():
+        return redirect(url_for("index"))
+    return render_template("login.html", oauth_configured=OAUTH_CONFIGURED)
+
+
+@app.route("/auth/login")
+def auth_login():
+    if not OAUTH_CONFIGURED:
+        return redirect(url_for("login"))
+    redirect_uri = url_for("auth_callback", _external=True)
+    return google.authorize_redirect(redirect_uri)
+
+
+@app.route("/auth/callback")
+def auth_callback():
+    if not OAUTH_CONFIGURED:
+        return redirect(url_for("login"))
+    try:
+        token = google.authorize_access_token()
+    except Exception:  # noqa: BLE001 — denied consent / bad state / network
+        app.logger.exception("OAuth callback failed")
+        return redirect(url_for("login"))
+    info = token.get("userinfo") or {}
+    google_id = info.get("sub")
+    if not google_id:
+        return redirect(url_for("login"))
+    name = info.get("name") or info.get("given_name") or info.get("email") or "User"
+    email = info.get("email")
+    picture = info.get("picture")
+    conn = db()
+    try:
+        sa.upsert_user(conn, google_id=google_id, name=name, email=email, picture=picture)
+    finally:
+        conn.close()
+    session["user"] = {"google_id": google_id, "name": name, "email": email, "picture": picture}
+    session.permanent = True  # honor the 2-week lifetime
+    return redirect(url_for("index"))
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/api/me")
+@require_login
+def api_me():
+    """The signed-in user + their personality profile (for the header + sidebar card)."""
+    user = current_user()
+    conn = db()
+    try:
+        profile = sa.get_user_profile(conn, user["google_id"])
+    finally:
+        conn.close()
+    return jsonify({
+        "user": {"name": user.get("name"), "email": user.get("email"),
+                 "picture": user.get("picture")},
+        "profile": profile,
+    })
 
 
 # --------------------------------------------------------------------------- #
@@ -115,25 +239,27 @@ def metrics_payload(conn: sqlite3.Connection) -> dict:
 # --------------------------------------------------------------------------- #
 @app.route("/")
 def index():
+    if not session_id():
+        return redirect(url_for("login"))
     return render_template("index.html")
 
 
 @app.route("/api/metrics")
+@require_login
 def api_metrics():
     sid = session_id()
     conn = db()
     try:
-        return jsonify(metrics_payload(conn))
+        return jsonify(metrics_payload(conn, sid))
     finally:
         conn.close()
 
 
 @app.route("/api/conversations")
+@require_login
 def api_conversations():
-    """List this session's past conversations for the history sidebar."""
+    """List this user's past conversations for the history sidebar."""
     sid = session_id()
-    if not sid:
-        return jsonify({"conversations": []})
     conn = db()
     try:
         return jsonify({"conversations": sa.list_conversations(conn, sid)})
@@ -142,11 +268,10 @@ def api_conversations():
 
 
 @app.route("/api/conversation/<conversation_id>")
+@require_login
 def api_conversation(conversation_id: str):
-    """Load the full transcript of one past conversation (scoped to the session)."""
+    """Load the full transcript of one past conversation (scoped to the user)."""
     sid = session_id()
-    if not sid:
-        return json_error("Missing session id.", 400, "invalid_request")
     conn = db()
     try:
         return jsonify({
@@ -158,6 +283,7 @@ def api_conversation(conversation_id: str):
 
 
 @app.route("/api/query", methods=["POST"])
+@require_login
 def api_query():
     """Stream an A/B answer pair as newline-delimited JSON (NDJSON).
 
@@ -181,16 +307,23 @@ def api_query():
         return json.dumps(obj) + "\n"
 
     def generate():
-        # Pre-processor step 1: if the query is ambiguous, ask before answering.
-        # The user can tap a chip (which refines it) or resend with force=true.
-        if not force:
-            chips = sa.clarifying_questions(query)
-            if chips:
-                yield emit({"type": "clarify", "clarify": chips, "original_query": query})
-                return
-
         conn = db()
         try:
+            # Pre-processor step 1: if the query is ambiguous, ask ONE natural
+            # question and wait for the user's reply. The original query and the
+            # question are saved to the transcript, so when the user answers in
+            # their own words the next turn has the full context (no chips/buttons).
+            if not force:
+                question = sa.clarifying_question(client, query)
+                if question:
+                    sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
+                                    role="user", content=query)
+                    sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
+                                    role="assistant", content=question)
+                    yield emit({"type": "clarify", "question": question,
+                                "conversation_id": conversation_id})
+                    return
+
             # Reward the PRIOR answer when this is a follow-up — the user was engaged
             # enough to keep going (+0.2). Recorded before the new turn, so it lands
             # on the answer that prompted the continuation.
@@ -208,14 +341,22 @@ def api_query():
             # comes back, so a total API failure leaves no dangling turn).
             history = sa.conversation_history(conn, conversation_id, limit=10)
             group = sa.next_query_group(conn)
-            applied = sa.match_lessons(conn, query)
+            applied = sa.match_lessons(conn, query, session_id=sid)
             applied_ids = [l["id"] for l in applied]
             # Classify → policy-bias the base model; split per side (Haiku A / Sonnet
-            # B on complex). Steer both drafts toward the policy style via the prompt.
-            routing = sa.apply_policy(conn, sa.classify_query(query))
+            # B on complex). Steer both drafts toward the user's policy + personality
+            # profile via the system prompt (prepended to the matched lessons).
+            routing = sa.apply_policy(conn, sa.classify_query(query), session_id=sid)
             routing_a, routing_b = sa.ab_routings(routing)
-            directive = sa.policy_directive(conn)
-            lesson_texts = ([directive] if directive else []) + [l["text"] for l in applied]
+            directive = sa.policy_directive(conn, sid)
+            profile = sa.get_user_profile(conn, sid)
+            profile_note = sa.profile_directive(profile)
+            personalized = bool(profile_note)
+            lesson_texts = (
+                ([profile_note] if profile_note else [])
+                + ([directive] if directive else [])
+                + [l["text"] for l in applied]
+            )
 
             yield emit({
                 "type": "meta",
@@ -228,6 +369,7 @@ def api_query():
                 "routing_b": routing_b,
                 "applied_lessons": applied,
                 "applied_count": len(applied),
+                "personalized": personalized,
             })
 
             # Generate A and B in parallel; stream each as soon as it's ready.
@@ -273,6 +415,7 @@ def api_query():
                 )
                 sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
                                 role="assistant", content=single["answer"], sources=single["sources"])
+                sa.maybe_update_profile(conn, sid)  # rebuild the profile every 5 queries
                 followups = sa.suggest_followups(client, query, single["answer"])
                 yield emit({
                     "type": "single",
@@ -295,6 +438,7 @@ def api_query():
 
 
 @app.route("/api/prefer", methods=["POST"])
+@require_login
 def api_prefer():
     """Record which A/B answer the user preferred.
 
@@ -302,6 +446,7 @@ def api_prefer():
     completion-rate and feedback history stay intact). The lesson is created
     later, once the user gives a reason (see /api/prefer_reason).
     """
+    sid = session_id()
     data = request.get_json(silent=True) or {}
     comparison_id = data.get("comparison_id")
     preferred = data.get("preferred")  # 'A' | 'B'
@@ -363,8 +508,9 @@ def api_prefer():
             interaction_id=lose_id, query_group=comp["query_group"], session_id=comp["session_id"],
             model=lose_model, style=sa.STYLE_OF_SIDE[loser_side], query_type=win_qtype,
         )
-        # Re-evaluate the policy after every POLICY_EVERY reward-bearing queries.
-        policy_update = sa.maybe_update_policy(conn)
+        # Re-evaluate this user's policy + personality profile on their cadence.
+        policy_update = sa.maybe_update_policy(conn, comp["session_id"])
+        sa.maybe_update_profile(conn, comp["session_id"])
 
         # The winning answer becomes the assistant's turn in the conversation
         # transcript — so it's part of the memory passed to future questions.
@@ -383,19 +529,21 @@ def api_prefer():
             "preferred": preferred,
             "followups": followups,
             "policy_update": policy_update,
-            "metrics": metrics_payload(conn),
+            "metrics": metrics_payload(conn, sid),
         })
     finally:
         conn.close()
 
 
 @app.route("/api/prefer_reason", methods=["POST"])
+@require_login
 def api_prefer_reason():
     """Record why the user preferred an answer, and learn a lesson from it.
 
     Returns the plain-English "Learning Card" text plus refreshed metrics so the
     Lessons feed and Training Progress update immediately.
     """
+    sid = session_id()
     data = request.get_json(silent=True) or {}
     comparison_id = data.get("comparison_id")
     reason = (data.get("reason") or "").strip()
@@ -441,7 +589,7 @@ def api_prefer_reason():
                 "status": "ok",
                 "learning_card": lesson["text"],
                 "lesson": lesson,
-                "metrics": metrics_payload(conn),
+                "metrics": metrics_payload(conn, sid),
             }
         )
     finally:
@@ -449,7 +597,9 @@ def api_prefer_reason():
 
 
 @app.route("/api/feedback", methods=["POST"])
+@require_login
 def api_feedback():
+    sid = session_id()
     data = request.get_json(silent=True) or {}
     interaction_id = data.get("interaction_id")
     group_id = data.get("group_id")
@@ -473,9 +623,10 @@ def api_feedback():
             conn, signal="thumbs_up" if feedback == "up" else "thumbs_down",
             score=sa.REWARD_SCORES["thumbs_up" if feedback == "up" else "thumbs_down"],
             interaction_id=int(interaction_id), query_group=int(group_id),
-            session_id=session_id(), model=fb_model, query_type=fb_qtype,
+            session_id=sid, model=fb_model, query_type=fb_qtype,
         )
-        policy_update = sa.maybe_update_policy(conn)
+        policy_update = sa.maybe_update_policy(conn, sid)
+        sa.maybe_update_profile(conn, sid)
 
         retry = None
         learning = False
@@ -538,7 +689,7 @@ def api_feedback():
                 "learning": learning,
                 "retry": retry,
                 "policy_update": policy_update,
-                "metrics": metrics_payload(conn),
+                "metrics": metrics_payload(conn, sid),
             }
         )
     finally:
@@ -579,26 +730,27 @@ def api_migrate():
             "status": "ok",
             "db_path": sa.DB_PATH,
             "imported": counts,
-            "metrics": metrics_payload(conn),
+            "metrics": metrics_payload(conn, None),
         })
     finally:
         conn.close()
 
 
 @app.route("/api/reset", methods=["POST"])
+@require_login
 def api_reset():
-    """Clear ALL data (global) — interactions, comparisons, lessons, messages.
-
-    The dashboard is a global, all-session view, so the demo Reset wipes
-    everything (including every session's conversation history).
+    """Clear the SIGNED-IN USER's data — their conversations, feedback, lessons,
+    rewards, policy, and profile. Other users' data and accounts are untouched.
     """
+    sid = session_id()
     conn = db()
     try:
-        # Clears every data table (incl. rewards + policy_updates) for a clean demo.
+        # Every data table carries the owner's id (user_profiles via google_id).
         for table in sa.DATA_TABLES:
-            conn.execute(f"DELETE FROM {table}")
+            owner_col = "google_id" if table == "user_profiles" else "session_id"
+            conn.execute(f"DELETE FROM {table} WHERE {owner_col} = ?", (sid,))
         conn.commit()
-        return jsonify({"status": "ok", "metrics": metrics_payload(conn)})
+        return jsonify({"status": "ok", "metrics": metrics_payload(conn, sid)})
     finally:
         conn.close()
 
