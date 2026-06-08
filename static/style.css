@@ -412,6 +412,19 @@ body {
 .ab-answer.loser { opacity: .5; }
 .ab-answer.loser .ab-pick { display: none; }
 
+/* Streaming placeholders: a side awaiting its answer shows a shimmering label;
+   a side whose draft failed/timed out is dimmed. */
+.ab-pick:disabled { opacity: .45; box-shadow: none; }
+.ab-shimmer {
+  display: inline-block; font-size: 13px; font-weight: 600;
+  background: linear-gradient(90deg, var(--muted), #fff, var(--muted));
+  background-size: 200% 100%; -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; animation: shimmer 2.4s linear infinite;
+}
+.ab-answer.pending { border-style: dashed; }
+.ab-answer.failed { opacity: .5; }
+.ab-failed { font-size: 13px; color: var(--muted); font-style: italic; }
+
 /* reason chips (why did you prefer this) */
 .ab-reason { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); animation: rise .35s ease; }
 .reason-head { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 10px; }

@@ -24,7 +24,8 @@ import os
 import sqlite3
 import sys
 import textwrap
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 import anthropic
 
@@ -143,10 +144,13 @@ POLICY_EVERY = 5         # re-evaluate the policy after every N reward-bearing q
 WEB_SEARCH_TOOL = {
     "type": "web_search_20260209",
     "name": "web_search",
-    "max_uses": 5,
+    # Fewer search rounds → fewer results injected into the prompt → far fewer
+    # tokens (the tool has no per-result cap), which keeps each answer fast.
+    "max_uses": 2,
     "allowed_callers": ["direct"],
 }
-MAX_SOURCES = 8          # cap how many sources we surface per answer
+MAX_SOURCES = 3          # cap how many sources we surface per answer (top 3)
+ANSWER_TIMEOUT_S = 90    # hard per-answer generation timeout (each A/B draft)
 
 
 # --------------------------------------------------------------------------- #
@@ -229,6 +233,29 @@ def build_routing(complexity: str) -> dict:
         "icon": tier["icon"],
         "badge": badge,
     }
+
+
+def ab_routings(base_routing: dict) -> tuple[dict, dict]:
+    """Per-side routing for the A/B pair.
+
+    For COMPLEX queries, split the models so the user sees a good answer fast:
+    Answer A uses Haiku (fast, concise) and Answer B uses Sonnet (thorough,
+    detailed). For simpler tiers both sides keep the (policy-biased) base routing.
+    The complex split intentionally overrides the policy's model for the A/B pair —
+    that latency strategy is the whole point of the split.
+    """
+    if base_routing.get("complexity") == "complex":
+        tier = TIERS["complex"]
+        a = dict(base_routing)
+        a.update({
+            "model": HAIKU_MODEL,
+            "model_label": "Haiku",
+            "badge": f"{tier['icon']} Complex · Haiku · {tier['mode']}",
+        })
+        a.pop("policy_biased", None)  # this side is fixed to Haiku by design
+        b = build_routing("complex")  # Sonnet
+        return a, b
+    return dict(base_routing), dict(base_routing)
 
 
 def _reasoning_kwargs(model: str) -> dict:
@@ -425,6 +452,10 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure("interactions", "session_id", "TEXT")
     _ensure("comparisons", "session_id", "TEXT")
     _ensure("comparisons", "conversation_id", "TEXT")
+    # Per-side routing — A and B can use different models (Haiku A / Sonnet B on
+    # complex queries), so the reward system can attribute the winner to its model.
+    _ensure("comparisons", "routing_a", "TEXT")
+    _ensure("comparisons", "routing_b", "TEXT")
     _ensure("lessons", "session_id", "TEXT")
     conn.commit()
 
@@ -654,15 +685,22 @@ def record_comparison(
     lessons_applied: list[int],
     session_id: str | None = None,
     conversation_id: str | None = None,
+    routing_a: dict | None = None,
+    routing_b: dict | None = None,
 ) -> int:
-    """Persist a freshly generated A/B pair (no preference yet); return its id."""
+    """Persist a freshly generated A/B pair (no preference yet); return its id.
+
+    ``routing`` is the base classification (used for the UI badge); ``routing_a`` /
+    ``routing_b`` are the per-side routings (they differ on complex queries) and
+    default to ``routing`` so the reward system can attribute the winner correctly.
+    """
     cur = conn.execute(
         """
         INSERT INTO comparisons
             (query_group, session_id, conversation_id, original_query, effective_query,
-             answer_a, answer_b, sources_a, sources_b, routing, preferred, reason,
-             lessons_applied, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+             answer_a, answer_b, sources_a, sources_b, routing, routing_a, routing_b,
+             preferred, reason, lessons_applied, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
         """,
         (
             query_group,
@@ -675,6 +713,8 @@ def record_comparison(
             json.dumps(answers["a"]["sources"]),
             json.dumps(answers["b"]["sources"]),
             json.dumps(routing),
+            json.dumps(routing_a or routing),
+            json.dumps(routing_b or routing),
             json.dumps(lessons_applied or []),
             _dt.datetime.now().isoformat(timespec="seconds"),
         ),
@@ -687,7 +727,8 @@ def get_comparison(conn: sqlite3.Connection, comparison_id: int) -> dict | None:
     row = conn.execute(
         """
         SELECT id, query_group, session_id, conversation_id, original_query, effective_query,
-               answer_a, answer_b, sources_a, sources_b, routing, preferred, reason
+               answer_a, answer_b, sources_a, sources_b, routing, routing_a, routing_b,
+               preferred, reason
         FROM comparisons WHERE id = ?
         """,
         (comparison_id,),
@@ -696,7 +737,7 @@ def get_comparison(conn: sqlite3.Connection, comparison_id: int) -> dict | None:
         return None
     keys = ["id", "query_group", "session_id", "conversation_id", "original_query",
             "effective_query", "answer_a", "answer_b", "sources_a", "sources_b",
-            "routing", "preferred", "reason"]
+            "routing", "routing_a", "routing_b", "preferred", "reason"]
     return dict(zip(keys, row))
 
 
@@ -1347,6 +1388,49 @@ def search_and_answer(
     return answer, extract_sources(final)
 
 
+def iter_ab_answers(
+    client: anthropic.Anthropic,
+    query: str,
+    lessons: list[str],
+    routing_by_side: dict[str, dict],
+    history: list[dict] | None = None,
+    timeout: float = ANSWER_TIMEOUT_S,
+):
+    """Generate Answer A and B in parallel, yielding each as soon as it's ready.
+
+    ``routing_by_side`` maps "A"/"B" → routing dict (see ab_routings; on complex
+    queries A is Haiku and B is Sonnet, so the fast one streams out first). Yields
+    ``(side, {"answer", "sources"})`` on success or ``(side, {"error": msg})`` when a
+    draft fails or exceeds ``timeout`` seconds. Each draft is bounded independently,
+    so a slow Sonnet B never blocks delivering a finished Haiku A.
+
+    A is factual & concise (STYLE_A); B is detailed & analytical (STYLE_B) — the
+    two distinct styles (plus the model split) keep the answers genuinely different.
+    """
+    styles = {"A": STYLE_A, "B": STYLE_B}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futs = {
+            pool.submit(search_and_answer, client, query, lessons,
+                        routing_by_side[side], styles[side], None, history): side
+            for side in ("A", "B")
+        }
+        pending = set(futs)
+        try:
+            for fut in as_completed(futs, timeout=timeout):
+                side = futs[fut]
+                pending.discard(fut)
+                try:
+                    ans, src = fut.result()
+                    yield side, {"answer": ans, "sources": src}
+                except Exception as exc:  # noqa: BLE001 — keep the other side alive
+                    yield side, {"error": str(exc) or exc.__class__.__name__}
+        except FuturesTimeoutError:
+            pass  # remaining sides blew the per-answer budget; reported below
+        for fut in pending:
+            fut.cancel()
+            yield futs[fut], {"error": f"timed out after {int(timeout)}s"}
+
+
 def generate_ab_answers(
     client: anthropic.Anthropic,
     query: str,
@@ -1354,37 +1438,24 @@ def generate_ab_answers(
     routing: dict,
     history: list[dict] | None = None,
 ) -> dict:
-    """Generate two web-grounded answers in parallel for side-by-side comparison.
+    """Non-streaming A/B generation: collect both drafts, then return them together.
 
-    Answer A is factual & concise; Answer B is detailed & analytical. Both run
-    web search with the routed model and share the same conversation ``history``;
-    running them on threads keeps total latency close to a single answer.
-
-    Resilient to a flaky API: if one of the two calls fails, we fall back to
-    whichever answer succeeded and flag ``single`` so the caller serves one
-    answer instead of failing the whole request. Returns
-    {"a": {...}, "b": {...} | None, "single": bool}. Raises only if BOTH fail.
+    Thin wrapper over iter_ab_answers for callers that want a single dict rather
+    than a stream. Both sides use the same ``routing``. Resilient to a flaky API:
+    if only one draft succeeds it's returned with ``single=True``; raises only if
+    BOTH fail. Returns {"a": {...}, "b": {...} | None, "single": bool}.
     """
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = {
-            "a": pool.submit(search_and_answer, client, query, lessons, routing, STYLE_A, None, history),
-            "b": pool.submit(search_and_answer, client, query, lessons, routing, STYLE_B, None, history),
-        }
-        results: dict[str, dict] = {}
-        errors: list[Exception] = []
-        for key, fut in futures.items():  # .result() waits for both either way
-            try:
-                ans, src = fut.result()
-                results[key] = {"answer": ans, "sources": src}
-            except Exception as exc:  # noqa: BLE001 — keep the other answer alive
-                errors.append(exc)
-
-    if "a" in results and "b" in results:
-        return {"a": results["a"], "b": results["b"], "single": False}
+    results: dict[str, dict] = {}
+    for side, res in iter_ab_answers(client, query, lessons,
+                                     {"A": routing, "B": routing}, history):
+        if "answer" in res:
+            results[side] = res
+    if "A" in results and "B" in results:
+        return {"a": results["A"], "b": results["B"], "single": False}
     if results:  # exactly one survived — serve it as a single answer
-        only = results.get("a") or results.get("b")
+        only = results.get("A") or results.get("B")
         return {"a": only, "b": None, "single": True}
-    raise errors[0]  # both failed — surface the error to the caller
+    raise RuntimeError("Both A/B answers failed to generate.")
 
 
 def suggest_followups(
