@@ -35,6 +35,15 @@ sa.sanitize_env_secret("ANTHROPIC_AUTH_TOKEN")
 app = Flask(__name__)
 client = anthropic.Anthropic(api_key=_API_KEY) if _API_KEY else anthropic.Anthropic()
 
+# Honor the platform's proxy headers (Railway/most PaaS terminate TLS and forward
+# over http with X-Forwarded-Proto: https). Without this, url_for(_external=True)
+# would build an http:// redirect_uri even on an https site — Google rejects http
+# redirect URIs for non-localhost, so OAuth would fail. With it, the redirect_uri
+# is correctly https on Railway, which is exactly why no insecure-transport flag
+# (OAUTHLIB_INSECURE_TRANSPORT) is needed there.
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
 # --------------------------------------------------------------------------- #
 # Auth: Google sign-in (Authlib) + a 2-week signed-cookie session
 # --------------------------------------------------------------------------- #
@@ -182,6 +191,11 @@ def auth_login():
     if not OAUTH_CONFIGURED:
         return redirect(url_for("login"))
     redirect_uri = url_for("auth_callback", _external=True)
+    # Log the EXACT redirect URI sent to Google — it must match an "Authorized
+    # redirect URI" in your Google OAuth client byte-for-byte. (print → stdout so
+    # it always shows in Railway/gunicorn logs regardless of log level.)
+    print(f"[oauth] redirect_uri sent to Google: {redirect_uri}", flush=True)
+    app.logger.info("OAuth redirect_uri: %s", redirect_uri)
     return google.authorize_redirect(redirect_uri)
 
 
