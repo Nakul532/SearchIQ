@@ -17,7 +17,7 @@ import os
 import sqlite3
 
 import anthropic
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from werkzeug.exceptions import HTTPException
 
 import search_agent as sa
@@ -159,6 +159,13 @@ def api_conversation(conversation_id: str):
 
 @app.route("/api/query", methods=["POST"])
 def api_query():
+    """Stream an A/B answer pair as newline-delimited JSON (NDJSON).
+
+    Each draft is delivered the instant it finishes, so the fast one (Haiku on
+    complex queries) reaches the UI in ~10s while the thorough one (Sonnet) is
+    still generating. Event types: clarify | meta | answer | comparison | single |
+    error (see static/app.js for the consumer).
+    """
     data = request.get_json(silent=True) or {}
     query = str(data.get("query", "")).strip()
     force = bool(data.get("force"))  # bypass the clarifying-question check
@@ -170,112 +177,121 @@ def api_query():
     if not sid or not conversation_id:
         return json_error("Missing session or conversation id.", 400, "invalid_request")
 
-    # Pre-processor step 1: if the query is ambiguous, ask before answering.
-    # The user can tap a chip (which refines the query) or resend with force=true.
-    if not force:
-        chips = sa.clarifying_questions(query)
-        if chips:
-            return jsonify({"clarify": chips, "original_query": query})
+    def emit(obj) -> str:
+        return json.dumps(obj) + "\n"
 
-    conn = db()
-    try:
-        # Reward the PRIOR answer when this query is a follow-up — the user was
-        # engaged enough to keep going (+0.2). Attributed before we record the new
-        # turn, so it lands on the answer that prompted the continuation.
-        if followup:
-            prev = sa.last_interaction(conn, sid)
-            if prev:
-                p_model, p_qtype = sa.routing_facets(prev["routing"])
-                sa.record_reward(
-                    conn, signal="followup", score=sa.REWARD_SCORES["followup"],
-                    interaction_id=prev["id"], query_group=prev["query_group"],
-                    session_id=sid, model=p_model, query_type=p_qtype,
-                )
+    def generate():
+        # Pre-processor step 1: if the query is ambiguous, ask before answering.
+        # The user can tap a chip (which refines it) or resend with force=true.
+        if not force:
+            chips = sa.clarifying_questions(query)
+            if chips:
+                yield emit({"type": "clarify", "clarify": chips, "original_query": query})
+                return
 
-        # Load prior turns for context (this question is saved only after the
-        # answers come back, so a transient API failure leaves no dangling turn).
-        history = sa.conversation_history(conn, conversation_id, limit=10)
-
-        group = sa.next_query_group(conn)
-        # Apply lessons the whole system has learned from past preferences on similar queries.
-        applied = sa.match_lessons(conn, query)
-        applied_ids = [l["id"] for l in applied]
-        # Pre-processor step 2: classify complexity → choose the aggregation model,
-        # then let the learned policy bias the model toward the highest-reward one.
-        routing = sa.apply_policy(conn, sa.classify_query(query))
-        # Steer BOTH drafts toward the policy's winning style via the system prompt
-        # (prepended to the matched lessons, which build_system_prompt renders).
-        directive = sa.policy_directive(conn)
-        lesson_texts = ([directive] if directive else []) + [l["text"] for l in applied]
+        conn = db()
         try:
-            answers = sa.generate_ab_answers(client, query, lesson_texts, routing, history=history)
-        except anthropic.APIError as exc:
-            return claude_error(exc) or json_error(str(exc), 502, "api_error")
+            # Reward the PRIOR answer when this is a follow-up — the user was engaged
+            # enough to keep going (+0.2). Recorded before the new turn, so it lands
+            # on the answer that prompted the continuation.
+            if followup:
+                prev = sa.last_interaction(conn, sid)
+                if prev:
+                    p_model, p_qtype = sa.routing_facets(prev["routing"])
+                    sa.record_reward(
+                        conn, signal="followup", score=sa.REWARD_SCORES["followup"],
+                        interaction_id=prev["id"], query_group=prev["query_group"],
+                        session_id=sid, model=p_model, query_type=p_qtype,
+                    )
 
-        # Record the user's turn now that we have answers to pair it with.
-        sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
-                        role="user", content=query)
-        if applied_ids:
-            sa.bump_applied_count(conn, applied_ids)
+            # Prior turns for context (the user turn is saved only after ≥1 answer
+            # comes back, so a total API failure leaves no dangling turn).
+            history = sa.conversation_history(conn, conversation_id, limit=10)
+            group = sa.next_query_group(conn)
+            applied = sa.match_lessons(conn, query)
+            applied_ids = [l["id"] for l in applied]
+            # Classify → policy-bias the base model; split per side (Haiku A / Sonnet
+            # B on complex). Steer both drafts toward the policy style via the prompt.
+            routing = sa.apply_policy(conn, sa.classify_query(query))
+            routing_a, routing_b = sa.ab_routings(routing)
+            directive = sa.policy_directive(conn)
+            lesson_texts = ([directive] if directive else []) + [l["text"] for l in applied]
 
-        # Fallback: only one of the two answers came back. Serve it directly —
-        # there's nothing to compare, so commit it as the assistant turn now and
-        # skip the prefer/reason step.
-        if answers.get("single"):
-            single = answers["a"]
-            sa.record_interaction(
-                conn, query_group=group, original_query=query, effective_query=query,
-                answer=single["answer"], feedback=None, comment=None, attempt=1,
-                sources=single["sources"], routing=routing, session_id=sid,
-            )
-            sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
-                            role="assistant", content=single["answer"], sources=single["sources"])
-            followups = sa.suggest_followups(client, query, single["answer"])
-            return jsonify(
-                {
-                    "single": True,
-                    "group_id": group,
-                    "conversation_id": conversation_id,
-                    "original_query": query,
-                    "effective_query": query,
-                    "routing": routing,
-                    "answer": single["answer"],
-                    "sources": single["sources"],
-                    "applied_lessons": applied,
-                    "applied_count": len(applied),
-                    "followups": followups,
-                }
-            )
-
-        comparison_id = sa.record_comparison(
-            conn,
-            query_group=group,
-            original_query=query,
-            effective_query=query,
-            answers=answers,
-            routing=routing,
-            lessons_applied=applied_ids,
-            session_id=sid,
-            conversation_id=conversation_id,
-        )
-        return jsonify(
-            {
-                "comparison_id": comparison_id,
+            yield emit({
+                "type": "meta",
                 "group_id": group,
                 "conversation_id": conversation_id,
                 "original_query": query,
                 "effective_query": query,
                 "routing": routing,
-                "answer_a": answers["a"]["answer"],
-                "sources_a": answers["a"]["sources"],
-                "answer_b": answers["b"]["answer"],
-                "sources_b": answers["b"]["sources"],
+                "routing_a": routing_a,
+                "routing_b": routing_b,
                 "applied_lessons": applied,
                 "applied_count": len(applied),
-            }
-        )
-    finally:
-        conn.close()
+            })
+
+            # Generate A and B in parallel; stream each as soon as it's ready.
+            results: dict[str, dict] = {}
+            for side, res in sa.iter_ab_answers(
+                client, query, lesson_texts, {"A": routing_a, "B": routing_b}, history=history
+            ):
+                if "answer" in res:
+                    results[side] = res
+                    yield emit({"type": "answer", "side": side,
+                                "answer": res["answer"], "sources": res["sources"]})
+
+            if not results:
+                yield emit({"type": "error",
+                            "error": "Both answers failed to generate — please try again.",
+                            "status": 502})
+                return
+
+            # ≥1 answer succeeded — record the user's turn now.
+            sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
+                            role="user", content=query)
+            if applied_ids:
+                sa.bump_applied_count(conn, applied_ids)
+
+            if "A" in results and "B" in results:
+                comparison_id = sa.record_comparison(
+                    conn, query_group=group, original_query=query, effective_query=query,
+                    answers={"a": results["A"], "b": results["B"]},
+                    routing=routing, lessons_applied=applied_ids,
+                    session_id=sid, conversation_id=conversation_id,
+                    routing_a=routing_a, routing_b=routing_b,
+                )
+                yield emit({"type": "comparison", "comparison_id": comparison_id})
+            else:
+                # Exactly one side survived — commit it as a single answer (no pick).
+                side = "A" if "A" in results else "B"
+                single = results[side]
+                single_routing = routing_a if side == "A" else routing_b
+                sa.record_interaction(
+                    conn, query_group=group, original_query=query, effective_query=query,
+                    answer=single["answer"], feedback=None, comment=None, attempt=1,
+                    sources=single["sources"], routing=single_routing, session_id=sid,
+                )
+                sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
+                                role="assistant", content=single["answer"], sources=single["sources"])
+                followups = sa.suggest_followups(client, query, single["answer"])
+                yield emit({
+                    "type": "single",
+                    "side": side,
+                    "group_id": group,
+                    "conversation_id": conversation_id,
+                    "routing": single_routing,
+                    "answer": single["answer"],
+                    "sources": single["sources"],
+                    "followups": followups,
+                })
+        except Exception as exc:  # noqa: BLE001 — stream the failure, headers are sent
+            app.logger.exception("Streaming query failed")
+            yield emit({"type": "error", "error": str(exc) or "Internal server error", "status": 500})
+        finally:
+            conn.close()
+
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    return Response(stream_with_context(generate()), mimetype="application/x-ndjson", headers=headers)
 
 
 @app.route("/api/prefer", methods=["POST"])
@@ -298,45 +314,54 @@ def api_prefer():
         if not comp:
             return json_error("Comparison not found.", 404, "not_found_error")
 
-        routing = json.loads(comp["routing"]) if comp["routing"] else None
+        def _json(s):
+            try:
+                return json.loads(s) if s else None
+            except (json.JSONDecodeError, TypeError):
+                return None
+
+        loser_side = "B" if preferred == "A" else "A"
         win_answer = comp["answer_a"] if preferred == "A" else comp["answer_b"]
         lose_answer = comp["answer_b"] if preferred == "A" else comp["answer_a"]
         win_sources = comp["sources_a"] if preferred == "A" else comp["sources_b"]
         lose_sources = comp["sources_b"] if preferred == "A" else comp["sources_a"]
+        # Per-side routing (A and B can be different models on complex queries) so
+        # rewards attribute the winner to the model that actually produced it.
+        routing_a = _json(comp.get("routing_a")) or _json(comp["routing"])
+        routing_b = _json(comp.get("routing_b")) or _json(comp["routing"])
+        win_routing = routing_a if preferred == "A" else routing_b
+        lose_routing = routing_b if preferred == "A" else routing_a
 
         def _src(s):
-            try:
-                return json.loads(s) if s else []
-            except (json.JSONDecodeError, TypeError):
-                return []
+            return _json(s) or []
 
         sa.set_preference(conn, int(comparison_id), preferred)
         # Winner = thumbs up (attempt 1), loser = thumbs down (attempt 2).
         win_id = sa.record_interaction(
             conn, query_group=comp["query_group"], original_query=comp["original_query"],
             effective_query=comp["effective_query"], answer=win_answer, feedback="up",
-            comment=None, attempt=1, sources=_src(win_sources), routing=routing,
+            comment=None, attempt=1, sources=_src(win_sources), routing=win_routing,
             session_id=comp["session_id"],
         )
         lose_id = sa.record_interaction(
             conn, query_group=comp["query_group"], original_query=comp["original_query"],
             effective_query=comp["effective_query"], answer=lose_answer, feedback="down",
-            comment=None, attempt=2, sources=_src(lose_sources), routing=routing,
+            comment=None, attempt=2, sources=_src(lose_sources), routing=lose_routing,
             session_id=comp["session_id"],
         )
 
         # Reward signals: winner +1.0, loser -0.5 (A = concise, B = detailed).
-        r_model, r_qtype = sa.routing_facets(routing)
-        loser_side = "B" if preferred == "A" else "A"
+        win_model, win_qtype = sa.routing_facets(win_routing)
+        lose_model, _ = sa.routing_facets(lose_routing)
         sa.record_reward(
             conn, signal="ab_winner", score=sa.REWARD_SCORES["ab_winner"],
             interaction_id=win_id, query_group=comp["query_group"], session_id=comp["session_id"],
-            model=r_model, style=sa.STYLE_OF_SIDE[preferred], query_type=r_qtype,
+            model=win_model, style=sa.STYLE_OF_SIDE[preferred], query_type=win_qtype,
         )
         sa.record_reward(
             conn, signal="ab_loser", score=sa.REWARD_SCORES["ab_loser"],
             interaction_id=lose_id, query_group=comp["query_group"], session_id=comp["session_id"],
-            model=r_model, style=sa.STYLE_OF_SIDE[loser_side], query_type=r_qtype,
+            model=lose_model, style=sa.STYLE_OF_SIDE[loser_side], query_type=win_qtype,
         )
         # Re-evaluate the policy after every POLICY_EVERY reward-bearing queries.
         policy_update = sa.maybe_update_policy(conn)
@@ -391,7 +416,14 @@ def api_prefer_reason():
         # +0.2, better sources +0.1) — credited to the winning answer's style.
         bonus = sa.REASON_BONUS.get(reason.lower())
         if bonus:
-            routing = json.loads(comp["routing"]) if comp["routing"] else None
+            # Attribute the bonus to the winning side's model (Haiku A / Sonnet B
+            # can differ on complex queries).
+            win_routing_key = "routing_a" if comp["preferred"] == "A" else "routing_b"
+            win_routing_raw = comp.get(win_routing_key) or comp["routing"]
+            try:
+                routing = json.loads(win_routing_raw) if win_routing_raw else None
+            except (json.JSONDecodeError, TypeError):
+                routing = None
             b_model, b_qtype = sa.routing_facets(routing)
             sa.record_reward(
                 conn, signal="reason_bonus", score=bonus,
