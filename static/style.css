@@ -526,3 +526,59 @@ body {
 @media (max-width: 640px) {
   .ab-compare { grid-template-columns: 1fr; }
 }
+
+/* ---------- Reward dashboard panel (reinforcement learning) ---------- */
+.reward-card { background: var(--grad-soft); border-color: rgba(167,139,250,.22); }
+.reward-chart-wrap { position: relative; margin-top: 13px; height: 96px; border-radius: 12px; background: rgba(255,255,255,.03); border: 1px solid var(--border); overflow: hidden; }
+.reward-chart { width: 100%; height: 100%; display: block; }
+.reward-chart-empty { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; color: var(--faint); }
+.rc-line { fill: none; stroke: var(--violet); stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.rc-area { fill: rgba(167,139,250,.12); stroke: none; }
+.rc-zero { stroke: var(--border-strong); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.reward-chart-cap { font-size: 11px; color: var(--muted); margin-top: 6px; text-align: center; }
+
+.reward-headline { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; margin-top: 14px; }
+.reward-stat { text-align: center; padding: 12px 8px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: rgba(255,255,255,.03); }
+.reward-stat-value { font-size: 26px; font-weight: 800; font-family: "JetBrains Mono", monospace; letter-spacing: -0.02em; }
+.reward-stat-value.pos { color: var(--up); }
+.reward-stat-value.neg { color: var(--down); }
+.reward-stat-label { font-size: 11px; color: var(--muted); margin-top: 4px; font-weight: 600; }
+
+.reward-posneg { display: flex; gap: 9px; margin-top: 11px; }
+.rpn { flex: 1; text-align: center; padding: 9px 6px; border-radius: 11px; font-size: 11.5px; font-weight: 600; border: 1px solid var(--border); }
+.rpn b { font-family: "JetBrains Mono", monospace; font-size: 16px; display: block; }
+.rpn span { color: var(--muted); }
+.rpn.pos { background: rgba(52,211,153,.1); border-color: rgba(52,211,153,.28); }
+.rpn.pos b { color: var(--up); }
+.rpn.neg { background: rgba(251,113,133,.1); border-color: rgba(251,113,133,.28); }
+.rpn.neg b { color: var(--down); }
+
+.reward-break { margin-top: 14px; }
+.rb-title { font-size: 11px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 7px; }
+.rb-bars { display: flex; flex-direction: column; gap: 7px; }
+.rb-row { display: grid; grid-template-columns: 64px 1fr 44px; align-items: center; gap: 8px; }
+.rb-key { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rb-track { position: relative; height: 9px; border-radius: 6px; background: rgba(255,255,255,.05); overflow: hidden; }
+.rb-track::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--border-strong); }
+.rb-fill { position: absolute; top: 0; bottom: 0; border-radius: 6px; transition: width .5s cubic-bezier(.2,.8,.3,1); }
+.rb-fill.pos { background: linear-gradient(90deg, rgba(52,211,153,.6), var(--up)); }
+.rb-fill.neg { background: linear-gradient(270deg, rgba(251,113,133,.6), var(--down)); }
+.rb-val { font-size: 11.5px; font-family: "JetBrains Mono", monospace; text-align: right; font-weight: 600; }
+.rb-val.pos { color: var(--up); }
+.rb-val.neg { color: var(--down); }
+
+.reward-policy { display: flex; gap: 10px; align-items: flex-start; margin-top: 15px; padding: 12px 14px; border-radius: var(--radius-sm); background: rgba(167,139,250,.1); border: 1px solid rgba(167,139,250,.3); animation: rise .4s ease; }
+.reward-policy .rp-icon { font-size: 17px; line-height: 1.2; }
+.reward-policy .rp-head { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--violet); font-weight: 700; }
+.reward-policy .rp-text { font-size: 12.5px; color: var(--text); line-height: 1.42; margin-top: 3px; }
+
+/* "Policy Updated" in-chat notification */
+.policy-card {
+  align-self: stretch; display: flex; gap: 12px; align-items: flex-start;
+  background: linear-gradient(135deg, rgba(167,139,250,.16), rgba(129,140,248,.1));
+  border: 1px solid rgba(167,139,250,.36); border-radius: var(--radius-sm);
+  padding: 13px 16px; margin: 4px 0; animation: rise .4s ease;
+}
+.policy-card .pc-icon { font-size: 20px; line-height: 1.2; }
+.policy-card .pc-text { font-size: 13.5px; color: var(--text); line-height: 1.45; }
+.policy-card .pc-text b { color: var(--violet); }
