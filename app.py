@@ -750,6 +750,72 @@ def api_migrate():
         conn.close()
 
 
+# Tables the restore endpoint may write to (every app table, incl. accounts).
+_RESTORE_TABLES = set(sa.DATA_TABLES) | {"users"}
+
+
+def _coerce_value(v):
+    """Bind-safe value: serialize nested JSON (dict/list) to a string for TEXT cols."""
+    if isinstance(v, (dict, list)):
+        return json.dumps(v)
+    return v
+
+
+@app.route("/api/restore", methods=["POST"])
+def api_restore():
+    """Restore data from JSON instead of SQL: {"table_name": [ {col: val, ...}, ... ]}.
+
+    Inserts the given rows directly into their tables (INSERT OR REPLACE, so it's
+    idempotent and re-runnable by primary key). A JSON alternative to /api/migrate.
+    Guarded by the same MIGRATE_TOKEN — pass it as ?token=, an X-Migrate-Token
+    header, or a "token" field in the JSON body. Only known app tables are allowed,
+    and only columns that actually exist on each table are written (so table/column
+    names can't be used for injection).
+    """
+    expected = os.environ.get("MIGRATE_TOKEN")
+    if not expected:
+        return json_error("Restore endpoint is disabled — set MIGRATE_TOKEN to enable it.",
+                          403, "forbidden")
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return json_error('Body must be a JSON object: {"table_name": [rows]}.',
+                          400, "invalid_request")
+    # Token from query / header / body; pop it so it isn't treated as a table.
+    supplied = (request.args.get("token") or request.headers.get("X-Migrate-Token")
+                or data.pop("token", None))
+    if supplied != expected:
+        return json_error("Invalid or missing restore token.", 401, "authentication_error")
+
+    conn = db()
+    try:
+        restored: dict[str, int] = {}
+        for table, rows in data.items():
+            if table not in _RESTORE_TABLES:
+                return json_error(f"Unknown or disallowed table: {table!r}.", 400, "invalid_request")
+            if not isinstance(rows, list):
+                return json_error(f"Rows for {table!r} must be a list.", 400, "invalid_request")
+            valid_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            inserted = 0
+            for row in rows:
+                if not isinstance(row, dict):
+                    return json_error(f"Each row in {table!r} must be a JSON object.", 400, "invalid_request")
+                pairs = [(k, v) for k, v in row.items() if k in valid_cols]
+                if not pairs:
+                    continue  # nothing usable in this row — skip
+                col_sql = ", ".join(k for k, _ in pairs)        # validated against PRAGMA
+                placeholders = ", ".join("?" for _ in pairs)
+                conn.execute(
+                    f"INSERT OR REPLACE INTO {table} ({col_sql}) VALUES ({placeholders})",
+                    [_coerce_value(v) for _, v in pairs],
+                )
+                inserted += 1
+            restored[table] = inserted
+        conn.commit()
+        return jsonify({"status": "ok", "db_path": sa.DB_PATH, "restored": restored})
+    finally:
+        conn.close()
+
+
 @app.route("/api/reset", methods=["POST"])
 @require_login
 def api_reset():
