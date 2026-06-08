@@ -1,6 +1,9 @@
 # Local SQLite data (use a Railway volume in production)
 *.db
 
+# DB exports from export_db.py (may contain user data)
+db_export.json
+
 # Python
 __pycache__/
 *.pyc
