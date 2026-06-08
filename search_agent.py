@@ -84,30 +84,59 @@ def estimate_query_cost(model: str) -> float:
     return AVG_INPUT_TOKENS / 1e6 * pin + AVG_OUTPUT_TOKENS / 1e6 * pout
 
 
-def _resolve_db_path() -> str:
+# Known persistent-volume mount points to fall back to when the env var that
+# normally points at them isn't injected. Railway mounts its volume at /data.
+_VOLUME_FALLBACKS = ("/data",)
+
+
+def _writable_dir(path: str) -> bool:
+    return bool(path) and os.path.isdir(path) and os.access(path, os.W_OK)
+
+
+def _resolve_db_path() -> tuple[str, str]:
     """Pick where the SQLite DB lives, honoring a persistent volume if present.
 
-    Priority:
-      1. DB_PATH env var — explicit full path to the .db file.
-      2. RAILWAY_VOLUME_MOUNT_PATH — Railway injects this when a volume is
-         attached; the DB goes inside it as search_agent.db so data survives
-         redeploys/restarts.
-      3. Local file next to this script (default for local dev).
-    The parent directory is created if needed.
+    Railway's filesystem is ephemeral — the DB MUST live on the attached volume
+    or it resets on every redeploy. Priority:
+      1. DB_PATH env var — explicit full path to the .db file (operator override).
+      2. RAILWAY_VOLUME_MOUNT_PATH — Railway injects this when a volume is attached;
+         the DB goes inside it (e.g. /data/search_agent.db).
+      3. A known mounted volume dir (e.g. /data) that exists and is writable — this
+         covers the case where the volume is mounted but the env var isn't injected.
+      4. Local file next to this script (ephemeral — local dev only).
+    Returns (path, source-label). The parent directory is created if needed.
     """
     explicit = os.environ.get("DB_PATH")
     volume = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
     if explicit:
-        path = explicit
+        path, source = explicit, "DB_PATH env"
     elif volume:
-        path = os.path.join(volume, "search_agent.db")
+        path, source = os.path.join(volume, "search_agent.db"), "RAILWAY_VOLUME_MOUNT_PATH"
     else:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "search_agent.db")
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    return path
+        mounted = next((d for d in _VOLUME_FALLBACKS if _writable_dir(d)), None)
+        if mounted:
+            path, source = os.path.join(mounted, "search_agent.db"), f"volume {mounted}"
+        else:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "search_agent.db")
+            source = "local (ephemeral)"
+    # Ensure the directory exists. If the chosen path isn't writable (e.g. a
+    # misconfigured volume), fall back to local rather than crashing the whole app
+    # — and log loudly, since that means data won't persist.
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    except OSError as exc:
+        local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "search_agent.db")
+        print(f"[db] WARNING: cannot write to {path} ({exc}); falling back to {local} "
+              f"(EPHEMERAL — data will reset). Check the volume mount.", flush=True)
+        path, source = local, "local fallback after volume error"
+        os.makedirs(os.path.dirname(os.path.abspath(local)), exist_ok=True)
+    return path, source
 
 
-DB_PATH = _resolve_db_path()
+DB_PATH, _DB_SOURCE = _resolve_db_path()
+# Surfaced in Railway/gunicorn logs so you can confirm the DB is on the volume.
+# A non-"/data" path here on Railway means data WILL reset on redeploy.
+print(f"[db] SQLite path: {DB_PATH}  (source: {_DB_SOURCE})", flush=True)
 MAX_RETRIES = 2          # how many rephrase-and-retry rounds per failed query
 DASHBOARD_EVERY = 5      # show the dashboard after this many queries
 LESSON_CONTEXT_LIMIT = 8 # how many recent feedback lessons to feed the model
