@@ -134,6 +134,7 @@ REASON_BONUS = {
 # (matches STYLE_A / STYLE_B and the lessons winning_style convention).
 STYLE_OF_SIDE = {"A": "concise", "B": "detailed"}
 POLICY_EVERY = 5         # re-evaluate the policy after every N reward-bearing queries
+PROFILE_EVERY = 5        # rebuild a user's personality profile after every N queries
 
 # Anthropic's built-in server-side web search tool. Runs the search on
 # Anthropic's infrastructure, feeds results into Claude's context, and returns
@@ -276,27 +277,36 @@ def _reasoning_kwargs(model: str) -> dict:
 # Generic "vague" terms that signal an under-specified query.
 _VAGUE_TERMS = {"best", "good", "top", "help", "recommend", "recommendation",
                 "recommendations", "tips", "advice", "ideas", "options"}
-# Category → clarifying chips. First matching category wins; else a generic set.
+# Category → a natural, conversational fallback question (used when the Haiku call
+# to phrase the question is unavailable). First matching category wins.
 _CLARIFY_CATEGORIES = [
     (("tool", "tools", "software", "app", "apps", "platform", "framework",
       "library", "stack", "service"),
-     ["For what purpose?", "Free or paid?", "For a team or individual?"]),
+     "Happy to help you find the right fit! Could you tell me a bit more about "
+     "what you're looking for — what would you use it for, and is this for personal "
+     "use or for a team?"),
     (("learn", "study", "course", "tutorial", "book", "books"),
-     ["What's your current level?", "For work or personal?", "How much time do you have?"]),
+     "I'd love to point you in the right direction — what's your current level with "
+     "this, and is it for work or personal interest?"),
     (("buy", "cheap", "budget", "price", "phone", "laptop", "car", "gift"),
-     ["What's your budget?", "What will you use it for?", "Any must-have features?"]),
+     "Sure! To narrow it down, what's your rough budget and what will you mainly "
+     "use it for?"),
     (("help", "advice", "tips", "ideas"),
-     ["What are you trying to do?", "What have you tried so far?", "What's the context?"]),
+     "Of course — could you tell me a bit more about what you're trying to do, and "
+     "what you've already tried?"),
 ]
-_CLARIFY_DEFAULT = ["What's the context?", "What are you trying to achieve?", "Any specific requirements?"]
+_CLARIFY_DEFAULT = (
+    "Could you tell me a bit more about what you're looking for? A little extra "
+    "context will help me give you a more useful answer."
+)
 
 
-def clarifying_questions(query: str) -> list[str]:
-    """Return 2-3 clarifying chips if the query is ambiguous, else an empty list.
+def _clarify_category(query: str) -> tuple[bool, str | None]:
+    """Rule-based ambiguity check (no API). Returns (ambiguous, fallback_question).
 
     Ambiguous = very short (≤3 words) or a vague generic term in a short query.
-    Specific multi-word queries (even with 'best') are left alone. Chips are
-    chosen contextually from the query's category.
+    Specific multi-word queries (even with 'best') are left alone. The fallback
+    question is chosen from the query's category.
     """
     q = (query or "").lower().strip()
     words = [w.strip(".,!?\"'()") for w in q.split()]
@@ -305,12 +315,47 @@ def clarifying_questions(query: str) -> list[str]:
 
     ambiguous = word_count <= 3 or (has_vague and word_count <= 4)
     if not ambiguous:
-        return []
-
-    for keywords, chips in _CLARIFY_CATEGORIES:
+        return False, None
+    for keywords, question in _CLARIFY_CATEGORIES:
         if any(w in keywords for w in words):
-            return chips
-    return _CLARIFY_DEFAULT
+            return True, question
+    return True, _CLARIFY_DEFAULT
+
+
+def clarifying_question(client: anthropic.Anthropic, query: str) -> str | None:
+    """If the query is ambiguous, return ONE natural clarifying question to ask.
+
+    The agent asks this in the chat like a person would; the user answers in their
+    own words (no chips/buttons), and that reply — together with this question, both
+    kept in the conversation history — gives the model the context to answer the
+    original query. The question is phrased by Haiku for a human touch and tailored
+    to the query; on any API failure it falls back to a templated question for the
+    query's category. Returns None when the query is specific enough to answer.
+    """
+    ambiguous, fallback = _clarify_category(query)
+    if not ambiguous:
+        return None
+    prompt = (
+        f'A user sent this short, ambiguous request: "{query}"\n\n'
+        "Before answering, ask them ONE warm, natural clarifying question — the way a "
+        "helpful person would in conversation — to learn what they actually need. "
+        "Reference what they asked about and weave in one or two concrete angles "
+        "(for example: the purpose, personal vs. professional use, budget, or skill "
+        "level) so it's easy to answer. Keep it to one or two friendly sentences. "
+        "Reply with ONLY the question — no preamble, no quotes, no lists."
+    )
+    try:
+        resp = client.messages.create(
+            model=HAIKU_MODEL,
+            max_tokens=120,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = next((b.text for b in resp.content if b.type == "text"), "").strip().strip('"').strip()
+        if text:
+            return text
+    except anthropic.APIError:
+        pass
+    return fallback
 
 
 def sanitize_env_secret(name: str) -> str | None:
@@ -441,6 +486,35 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # Authenticated Google accounts — identity persists across devices for 2 weeks.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            google_id       TEXT PRIMARY KEY,
+            name            TEXT,
+            email           TEXT,
+            profile_picture TEXT,
+            created_at      TEXT    NOT NULL,
+            last_login      TEXT
+        )
+        """
+    )
+    # Per-user personality profile, rebuilt every few queries from their own data.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            google_id       TEXT PRIMARY KEY,
+            expertise_level TEXT,              -- beginner | intermediate | expert
+            preferred_style TEXT,              -- concise | detailed
+            top_topics      TEXT,              -- JSON list of subjects
+            preferred_model TEXT,              -- Haiku | Sonnet (highest-reward)
+            summary         TEXT,              -- the system-prompt sentence
+            queries_at      INTEGER,           -- # of the user's queries at build time
+            updated_at      TEXT    NOT NULL
+        )
+        """
+    )
+
     # Migrations: add columns to pre-existing tables (idempotent).
     def _ensure(table: str, col: str, decl: str) -> None:
         existing = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
@@ -457,14 +531,18 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure("comparisons", "routing_a", "TEXT")
     _ensure("comparisons", "routing_b", "TEXT")
     _ensure("lessons", "session_id", "TEXT")
+    # Policy is now learned per user (scoped by the originating session_id/google_id).
+    _ensure("policy_updates", "session_id", "TEXT")
     conn.commit()
 
 
 # The app's data tables — used by restore_from_sql to clear the DB before a
 # full import (the backup is a sqlite `.dump`, whose CREATE TABLE statements
-# would otherwise collide with init_db's tables).
+# would otherwise collide with init_db's tables). NOTE: `users` is deliberately
+# excluded so accounts survive a reset/restore; user_profiles is derived data
+# and regenerates, so it's included.
 DATA_TABLES = ("interactions", "comparisons", "lessons", "messages",
-               "rewards", "policy_updates")
+               "rewards", "policy_updates", "user_profiles")
 
 
 def restore_from_sql(conn: sqlite3.Connection, sql_text: str) -> dict[str, int]:
@@ -876,17 +954,22 @@ def record_lesson(
     conn: sqlite3.Connection, *, topic: str, winning_style: str, reason: str | None,
     session_id: str | None = None,
 ) -> dict:
-    """Create a lesson from a preference, or reinforce an existing matching one.
+    """Create a lesson from a preference, or reinforce the user's matching one.
 
-    Lessons are GLOBAL — every session teaches one shared SearchIQ (the dashboard
-    aggregates them across all users). If a lesson already exists for the same
-    topic + winning style, its reason is refreshed rather than duplicated. The
-    originating ``session_id`` is still stored for provenance. Returns the lesson.
+    Lessons are scoped per user (``session_id`` = the user's google_id): each user
+    trains their own SearchIQ. A lesson for the same (session_id, topic,
+    winning_style) is refreshed rather than duplicated. Returns the lesson.
     """
-    existing = conn.execute(
-        "SELECT id FROM lessons WHERE topic = ? AND winning_style = ?",
-        (topic, winning_style),
-    ).fetchone()
+    if session_id is None:
+        existing = conn.execute(
+            "SELECT id FROM lessons WHERE topic = ? AND winning_style = ? AND session_id IS NULL",
+            (topic, winning_style),
+        ).fetchone()
+    else:
+        existing = conn.execute(
+            "SELECT id FROM lessons WHERE topic = ? AND winning_style = ? AND session_id = ?",
+            (topic, winning_style, session_id),
+        ).fetchone()
     text = format_lesson(topic, winning_style, reason)
     if existing:
         lesson_id = int(existing[0])
@@ -907,16 +990,22 @@ def record_lesson(
     return {"id": lesson_id, "topic": topic, "text": text, "winning_style": winning_style}
 
 
-def match_lessons(conn: sqlite3.Connection, query: str, limit: int = 5) -> list[dict]:
-    """Return lessons relevant to a query (topic appears in it), across all sessions.
+def match_lessons(conn: sqlite3.Connection, query: str, limit: int = 5,
+                  session_id: str | None = None) -> list[dict]:
+    """Return the user's lessons relevant to a query (topic appears in it).
 
-    Lessons are shared globally, so a winning style learned by anyone becomes the
-    preferred pattern for SIMILAR future queries. Returns dicts {id, text, topic}.
+    Scoped to ``session_id`` so a winning style the user taught becomes the
+    preferred pattern for their SIMILAR future queries (``None`` = all lessons,
+    used by the CLI). Returns dicts {id, text, topic}.
     """
     q = (query or "").lower()
-    rows = conn.execute(
-        "SELECT id, topic, text FROM lessons ORDER BY id DESC"
-    ).fetchall()
+    if session_id is None:
+        rows = conn.execute("SELECT id, topic, text FROM lessons ORDER BY id DESC").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, topic, text FROM lessons WHERE session_id = ? ORDER BY id DESC",
+            (session_id,),
+        ).fetchall()
     matched = [
         {"id": int(i), "topic": t, "text": txt}
         for (i, t, txt) in rows
@@ -936,25 +1025,37 @@ def bump_applied_count(conn: sqlite3.Connection, lesson_ids: list[int]) -> None:
     conn.commit()
 
 
-def all_lessons(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
-    """Return the global lessons feed for the dashboard, newest first."""
-    rows = conn.execute(
-        """
-        SELECT id, text, topic, applied_count, created_at
-        FROM lessons ORDER BY id DESC LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+def all_lessons(conn: sqlite3.Connection, limit: int = 50,
+                session_id: str | None = None) -> list[dict]:
+    """Return the user's lessons feed for the dashboard, newest first (None = all)."""
+    if session_id is None:
+        rows = conn.execute(
+            "SELECT id, text, topic, applied_count, created_at FROM lessons ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, text, topic, applied_count, created_at FROM lessons "
+            "WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
     return [
         {"id": int(i), "text": txt, "topic": t, "applied_count": int(ac), "created_at": ca}
         for (i, txt, t, ac, ca) in rows
     ]
 
 
-def training_progress(conn: sqlite3.Connection) -> dict:
-    """Global totals for the Training Progress stat: lessons learned + times applied."""
-    learned = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
-    applied = conn.execute("SELECT COALESCE(SUM(applied_count), 0) FROM lessons").fetchone()[0]
+def training_progress(conn: sqlite3.Connection, session_id: str | None = None) -> dict:
+    """Training Progress totals for the user: lessons learned + times applied."""
+    if session_id is None:
+        learned = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
+        applied = conn.execute("SELECT COALESCE(SUM(applied_count), 0) FROM lessons").fetchone()[0]
+    else:
+        learned = conn.execute(
+            "SELECT COUNT(*) FROM lessons WHERE session_id = ?", (session_id,)).fetchone()[0]
+        applied = conn.execute(
+            "SELECT COALESCE(SUM(applied_count), 0) FROM lessons WHERE session_id = ?",
+            (session_id,)).fetchone()[0]
     return {"lessons_learned": int(learned), "lessons_applied": int(applied)}
 
 
@@ -1047,11 +1148,18 @@ def _reward_velocity(group_totals: list[float]) -> float:
     return round(slope * 10, 3)
 
 
-def reward_stats(conn: sqlite3.Connection) -> dict:
-    """Aggregate the reward log for the Reward dashboard panel (global, all-time)."""
-    rows = conn.execute(
-        "SELECT query_group, score, model, style, query_type FROM rewards ORDER BY id"
-    ).fetchall()
+def reward_stats(conn: sqlite3.Connection, session_id: str | None = None) -> dict:
+    """Aggregate the reward log for the Reward dashboard panel (None = all users)."""
+    if session_id is None:
+        rows = conn.execute(
+            "SELECT query_group, score, model, style, query_type FROM rewards ORDER BY id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT query_group, score, model, style, query_type FROM rewards "
+            "WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
     total = len(rows)
     pos = [r for r in rows if r[1] > 0]
     neg = [r for r in rows if r[1] < 0]
@@ -1101,17 +1209,29 @@ def reward_stats(conn: sqlite3.Connection) -> dict:
     }
 
 
-def compute_best_pattern(conn: sqlite3.Connection) -> dict | None:
-    """Find the model+style+query_type combo with the highest average reward."""
-    rows = conn.execute(
-        """
-        SELECT model, style, query_type, AVG(score) AS avg_score, COUNT(*) AS n
-        FROM rewards
-        WHERE model IS NOT NULL AND style IS NOT NULL
-        GROUP BY model, style, query_type
-        ORDER BY avg_score DESC
-        """
-    ).fetchall()
+def compute_best_pattern(conn: sqlite3.Connection, session_id: str | None = None) -> dict | None:
+    """Find the user's highest-average-reward model+style+query_type combo (None = all)."""
+    if session_id is None:
+        rows = conn.execute(
+            """
+            SELECT model, style, query_type, AVG(score) AS avg_score, COUNT(*) AS n
+            FROM rewards
+            WHERE model IS NOT NULL AND style IS NOT NULL
+            GROUP BY model, style, query_type
+            ORDER BY avg_score DESC
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT model, style, query_type, AVG(score) AS avg_score, COUNT(*) AS n
+            FROM rewards
+            WHERE model IS NOT NULL AND style IS NOT NULL AND session_id = ?
+            GROUP BY model, style, query_type
+            ORDER BY avg_score DESC
+            """,
+            (session_id,),
+        ).fetchall()
     if not rows:
         return None
     model, style, query_type, best_avg, n = rows[0]
@@ -1143,22 +1263,35 @@ def _policy_text(pattern: dict) -> str:
             f"(avg {pattern['avg_reward']:+.2f}) for {scope}")
 
 
-def maybe_update_policy(conn: sqlite3.Connection) -> dict | None:
-    """Re-evaluate the policy after every POLICY_EVERY reward-bearing queries.
+def maybe_update_policy(conn: sqlite3.Connection, session_id: str | None = None) -> dict | None:
+    """Re-evaluate the user's policy after every POLICY_EVERY reward-bearing queries.
 
-    Picks the highest-reward pattern, records a policy_updates row, and upserts a
-    visible line into the lessons feed. Returns the pattern (with its plain-English
+    Scoped to ``session_id`` (None = the CLI/global bucket). Picks the user's
+    highest-reward pattern, records a per-user policy_updates row, and upserts a
+    visible line into their lessons feed. Returns the pattern (with its plain-English
     ``text``) when an update happens, else None. Idempotent within a checkpoint.
     """
-    n = int(conn.execute(
-        "SELECT COUNT(DISTINCT query_group) FROM rewards WHERE query_group IS NOT NULL"
-    ).fetchone()[0])
+    if session_id is None:
+        n = int(conn.execute(
+            "SELECT COUNT(DISTINCT query_group) FROM rewards WHERE query_group IS NOT NULL"
+        ).fetchone()[0])
+        last = conn.execute(
+            "SELECT queries_at FROM policy_updates WHERE session_id IS NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    else:
+        n = int(conn.execute(
+            "SELECT COUNT(DISTINCT query_group) FROM rewards WHERE query_group IS NOT NULL AND session_id = ?",
+            (session_id,),
+        ).fetchone()[0])
+        last = conn.execute(
+            "SELECT queries_at FROM policy_updates WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
     if n == 0 or n % POLICY_EVERY != 0:
         return None
-    last = conn.execute("SELECT queries_at FROM policy_updates ORDER BY id DESC LIMIT 1").fetchone()
     if last and last[0] is not None and int(last[0]) >= n:
         return None  # already updated at this checkpoint
-    pattern = compute_best_pattern(conn)
+    pattern = compute_best_pattern(conn, session_id)
     if not pattern:
         return None
 
@@ -1167,19 +1300,24 @@ def maybe_update_policy(conn: sqlite3.Connection) -> dict | None:
     conn.execute(
         """
         INSERT INTO policy_updates
-            (queries_at, model, style, query_type, avg_reward, multiplier, text, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (queries_at, model, style, query_type, avg_reward, multiplier, text, created_at, session_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (n, pattern["model"], pattern["style"], pattern["query_type"],
-         pattern["avg_reward"], pattern.get("multiplier"), text, now),
+         pattern["avg_reward"], pattern.get("multiplier"), text, now, session_id),
     )
-    # Log the policy change into the existing lessons feed (upsert by topic), so it
-    # shows up alongside preference lessons. topic 'policy:*' never matches a query
-    # (match_lessons does substring matching), so it stays display-only.
+    # Log the policy change into the user's lessons feed (upsert by topic). topic
+    # 'policy:*' never matches a query (match_lessons does substring matching), so
+    # it stays display-only.
     topic = f"policy:{pattern['query_type']}"
     feed_text = f"Policy: {text}"
     winning_style = "B" if pattern["style"] == "detailed" else "A"
-    existing = conn.execute("SELECT id FROM lessons WHERE topic = ?", (topic,)).fetchone()
+    if session_id is None:
+        existing = conn.execute(
+            "SELECT id FROM lessons WHERE topic = ? AND session_id IS NULL", (topic,)).fetchone()
+    else:
+        existing = conn.execute(
+            "SELECT id FROM lessons WHERE topic = ? AND session_id = ?", (topic, session_id)).fetchone()
     if existing:
         conn.execute(
             "UPDATE lessons SET text = ?, winning_style = ? WHERE id = ?",
@@ -1189,55 +1327,64 @@ def maybe_update_policy(conn: sqlite3.Connection) -> dict | None:
         conn.execute(
             """
             INSERT INTO lessons (session_id, topic, winning_style, reason, text, applied_count, created_at)
-            VALUES (NULL, ?, ?, NULL, ?, 0, ?)
+            VALUES (?, ?, ?, NULL, ?, 0, ?)
             """,
-            (topic, winning_style, feed_text, now),
+            (session_id, topic, winning_style, feed_text, now),
         )
     conn.commit()
     pattern["text"] = text
     return pattern
 
 
-def current_policy(conn: sqlite3.Connection) -> dict | None:
-    """The most recent learned policy (or None if none has been set yet)."""
-    row = conn.execute(
-        """
-        SELECT model, style, query_type, avg_reward, multiplier, text, created_at
-        FROM policy_updates ORDER BY id DESC LIMIT 1
-        """
-    ).fetchone()
+def current_policy(conn: sqlite3.Connection, session_id: str | None = None) -> dict | None:
+    """The user's most recent learned policy (None = the CLI/global bucket)."""
+    if session_id is None:
+        row = conn.execute(
+            """
+            SELECT model, style, query_type, avg_reward, multiplier, text, created_at
+            FROM policy_updates WHERE session_id IS NULL ORDER BY id DESC LIMIT 1
+            """
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT model, style, query_type, avg_reward, multiplier, text, created_at
+            FROM policy_updates WHERE session_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
     if not row:
         return None
     keys = ["model", "style", "query_type", "avg_reward", "multiplier", "text", "created_at"]
     return dict(zip(keys, row))
 
 
-def policy_directive(conn: sqlite3.Connection) -> str:
-    """A system-prompt note steering answers toward the policy's winning style.
+def policy_directive(conn: sqlite3.Connection, session_id: str | None = None) -> str:
+    """A system-prompt note steering answers toward the user's policy winning style.
 
     Prepended to the lessons list so it flows through build_system_prompt into BOTH
-    A/B drafts. Returns "" when no policy exists.
+    A/B drafts. Returns "" when the user has no policy yet.
     """
-    p = current_policy(conn)
+    p = current_policy(conn, session_id)
     if not p:
         return ""
     style_word = ("detailed, analytical and well-structured" if p["style"] == "detailed"
                   else "concise, factual and skimmable")
     qt = p.get("query_type")
     scope = "all queries" if qt in (None, "general") else f"{qt} queries"
-    return (f"LEARNED POLICY (from user reward signals): for {scope}, users most reward "
+    return (f"LEARNED POLICY (from your reward signals): for {scope}, you most reward "
             f"{style_word} answers — lean toward that where it fits the question.")
 
 
-def apply_policy(conn: sqlite3.Connection, routing: dict) -> dict:
-    """Bias model routing toward the current policy's highest-reward model.
+def apply_policy(conn: sqlite3.Connection, routing: dict, session_id: str | None = None) -> dict:
+    """Bias model routing toward the user's policy highest-reward model.
 
     When a policy exists, applies to this query's complexity (or is general), and
     prefers a different model than the rule-based router chose, swap the model in
     while keeping the complexity tier. Sets routing["policy_biased"]=True so the UI
     can flag it. No-op when there's no policy or it already agrees with the router.
     """
-    p = current_policy(conn)
+    p = current_policy(conn, session_id)
     if not p or not routing:
         return routing
     qt = p.get("query_type")
@@ -1254,6 +1401,173 @@ def apply_policy(conn: sqlite3.Connection, routing: dict) -> dict:
     biased["badge"] = f"{tier['icon']} {complexity.capitalize()} · {target_label} · {tier['mode']}"
     biased["policy_biased"] = True
     return biased
+
+
+# --------------------------------------------------------------------------- #
+# Users + personality profiles
+# --------------------------------------------------------------------------- #
+def upsert_user(conn: sqlite3.Connection, *, google_id: str, name: str | None,
+                email: str | None, picture: str | None) -> None:
+    """Create or refresh a Google account row; bumps last_login on every sign-in."""
+    now = _dt.datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """
+        INSERT INTO users (google_id, name, email, profile_picture, created_at, last_login)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(google_id) DO UPDATE SET
+            name = excluded.name, email = excluded.email,
+            profile_picture = excluded.profile_picture, last_login = excluded.last_login
+        """,
+        (google_id, name, email, picture, now, now),
+    )
+    conn.commit()
+
+
+def get_user(conn: sqlite3.Connection, google_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT google_id, name, email, profile_picture, created_at, last_login "
+        "FROM users WHERE google_id = ?",
+        (google_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return dict(zip(["google_id", "name", "email", "profile_picture", "created_at", "last_login"], row))
+
+
+def _profile_summary(expertise: str, style: str, topics: list[str], model: str | None) -> str:
+    """The one-line personality summary injected into Claude's system prompt."""
+    article = "an" if expertise in ("expert", "intermediate") else "a"
+    style_phrase = "detailed, technical answers" if style == "detailed" else "concise, to-the-point answers"
+    out = f"This user is {article} {expertise}-level user who prefers {style_phrase}."
+    if topics:
+        out += f" Top topics: {', '.join(topics)}."
+    if model:
+        out += f" They get the most value from {model} responses."
+    out += " Tailor depth, vocabulary, and length accordingly."
+    return out
+
+
+def build_user_profile(conn: sqlite3.Connection, google_id: str) -> dict:
+    """Derive a personality profile from the user's own queries + reward signals.
+
+    Heuristic (no extra LLM call): expertise from query complexity + vocabulary,
+    preferred style/model from reward-by-style/model, top topics from query topics.
+    """
+    rows = conn.execute(
+        "SELECT original_query, routing FROM interactions WHERE session_id = ?",
+        (google_id,),
+    ).fetchall()
+    comp = {"simple": 0, "medium": 0, "complex": 0}
+    words_total, nq = 0, 0
+    topics: dict[str, int] = {}
+    for original_query, routing in rows:
+        nq += 1
+        words_total += len((original_query or "").split())
+        complexity = None
+        if routing:
+            try:
+                complexity = (json.loads(routing) or {}).get("complexity")
+            except (json.JSONDecodeError, TypeError):
+                complexity = None
+        if complexity is None:
+            complexity = classify_query(original_query or "").get("complexity")
+        if complexity in comp:
+            comp[complexity] += 1
+        topic = extract_topic(original_query or "")
+        if topic:
+            topics[topic] = topics.get(topic, 0) + 1
+
+    total = max(1, nq)
+    complex_frac = comp["complex"] / total
+    simple_frac = comp["simple"] / total
+    avg_words = (words_total / nq) if nq else 0.0
+    if complex_frac >= 0.5 or (complex_frac >= 0.3 and avg_words >= 12):
+        expertise = "expert"
+    elif simple_frac >= 0.6 and avg_words <= 6:
+        expertise = "beginner"
+    else:
+        expertise = "intermediate"
+
+    stats = reward_stats(conn, google_id)
+    by_style, by_model = stats["by_style"], stats["by_model"]
+    preferred_style = "detailed" if by_style.get("detailed", 0.0) >= by_style.get("concise", 0.0) else "concise"
+    preferred_model = "Sonnet" if by_model.get("Sonnet", 0.0) >= by_model.get("Haiku", 0.0) else "Haiku"
+    if stats["total_events"] == 0:
+        preferred_model = None  # no reward data yet — don't claim a model preference
+    top_topics = [t for t, _ in sorted(topics.items(), key=lambda kv: (-kv[1], kv[0]))[:3]]
+
+    return {
+        "expertise_level": expertise,
+        "preferred_style": preferred_style,
+        "top_topics": top_topics,
+        "preferred_model": preferred_model,
+        "summary": _profile_summary(expertise, preferred_style, top_topics, preferred_model),
+        "queries": nq,
+    }
+
+
+def maybe_update_profile(conn: sqlite3.Connection, google_id: str | None) -> dict | None:
+    """Rebuild the user's profile after every PROFILE_EVERY queries (idempotent)."""
+    if not google_id:
+        return None
+    n = int(conn.execute(
+        "SELECT COUNT(DISTINCT query_group) FROM interactions WHERE session_id = ?",
+        (google_id,),
+    ).fetchone()[0])
+    if n == 0 or n % PROFILE_EVERY != 0:
+        return None
+    last = conn.execute(
+        "SELECT queries_at FROM user_profiles WHERE google_id = ?", (google_id,)
+    ).fetchone()
+    if last and last[0] is not None and int(last[0]) >= n:
+        return None
+    prof = build_user_profile(conn, google_id)
+    now = _dt.datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """
+        INSERT INTO user_profiles
+            (google_id, expertise_level, preferred_style, top_topics, preferred_model,
+             summary, queries_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(google_id) DO UPDATE SET
+            expertise_level = excluded.expertise_level, preferred_style = excluded.preferred_style,
+            top_topics = excluded.top_topics, preferred_model = excluded.preferred_model,
+            summary = excluded.summary, queries_at = excluded.queries_at, updated_at = excluded.updated_at
+        """,
+        (google_id, prof["expertise_level"], prof["preferred_style"], json.dumps(prof["top_topics"]),
+         prof["preferred_model"], prof["summary"], n, now),
+    )
+    conn.commit()
+    return prof
+
+
+def get_user_profile(conn: sqlite3.Connection, google_id: str | None) -> dict | None:
+    """Return the stored personality profile (top_topics parsed), or None."""
+    if not google_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT expertise_level, preferred_style, top_topics, preferred_model, summary, updated_at
+        FROM user_profiles WHERE google_id = ?
+        """,
+        (google_id,),
+    ).fetchone()
+    if not row:
+        return None
+    d = dict(zip(["expertise_level", "preferred_style", "top_topics", "preferred_model",
+                  "summary", "updated_at"], row))
+    try:
+        d["top_topics"] = json.loads(d["top_topics"]) if d["top_topics"] else []
+    except (json.JSONDecodeError, TypeError):
+        d["top_topics"] = []
+    return d
+
+
+def profile_directive(profile: dict | None) -> str:
+    """System-prompt note that personalizes answers to the user's profile ("" if none)."""
+    if not profile or not profile.get("summary"):
+        return ""
+    return "USER PROFILE — personalize to it: " + profile["summary"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1615,20 +1929,30 @@ def collect_feedback() -> tuple[str | None, str | None]:
 # --------------------------------------------------------------------------- #
 # Dashboard / metrics
 # --------------------------------------------------------------------------- #
-def compute_metrics(conn: sqlite3.Connection) -> dict:
-    """Compute query-group-level metrics for the dashboard, GLOBALLY.
+def compute_metrics(conn: sqlite3.Connection, session_id: str | None = None) -> dict:
+    """Compute query-group-level dashboard metrics for one user (None = all users).
 
     The North Star — total queries, completion rate, model mix, cost saved — is
-    an all-time, all-session view of the whole system (only the conversation
-    history sidebar is per-session).
+    scoped to ``session_id`` so each signed-in user sees their own stats.
     """
-    rows = conn.execute(
-        """
-        SELECT query_group, original_query, attempt, feedback, routing
-        FROM interactions
-        ORDER BY query_group, attempt
-        """
-    ).fetchall()
+    if session_id is None:
+        rows = conn.execute(
+            """
+            SELECT query_group, original_query, attempt, feedback, routing
+            FROM interactions
+            ORDER BY query_group, attempt
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT query_group, original_query, attempt, feedback, routing
+            FROM interactions
+            WHERE session_id = ?
+            ORDER BY query_group, attempt
+            """,
+            (session_id,),
+        ).fetchall()
 
     groups: dict[int, dict] = {}
     # Per-model-call tallies (every interaction is one aggregation call).

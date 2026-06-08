@@ -36,10 +36,17 @@
       </div>
       <div class="topbar-actions">
         <div class="live-pill"><span class="status-dot"></span> Live</div>
-        <button id="resetBtn" class="ghost-btn" title="Clear all data for a fresh demo">
+        <button id="resetBtn" class="ghost-btn" title="Clear your data for a fresh start">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
           Reset
         </button>
+        <div id="userChip" class="user-chip" hidden>
+          <img id="userAvatar" class="user-avatar" alt="" referrerpolicy="no-referrer" />
+          <span id="userName" class="user-name"></span>
+          <a class="ghost-btn icon-btn" id="logoutBtn" href="/logout" title="Sign out" aria-label="Sign out">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+          </a>
+        </div>
       </div>
     </header>
 
@@ -50,6 +57,19 @@
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
           New Chat
         </button>
+
+        <!-- Personality profile (built from the user's own history) -->
+        <div id="profileCard" class="profile-card" hidden>
+          <div class="profile-head">👤 Your Profile</div>
+          <div class="profile-rows">
+            <div class="profile-row"><span class="pf-label">Expertise</span><span class="pf-val" id="pfExpertise">—</span></div>
+            <div class="profile-row"><span class="pf-label">Prefers</span><span class="pf-val" id="pfStyle">—</span></div>
+          </div>
+          <div class="pf-topics-label">Top topics</div>
+          <div class="pf-topics" id="pfTopics"></div>
+          <div class="pf-status" id="pfStatus"></div>
+        </div>
+
         <div class="sidebar-label">History</div>
         <div id="historyList" class="history-list">
           <div class="history-empty">No conversations yet</div>
