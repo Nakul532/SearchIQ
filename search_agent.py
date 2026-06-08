@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 import sqlite3
 import sys
 import textwrap
@@ -752,6 +753,100 @@ def extract_topic(query: str) -> str:
     return salient[0] if salient else (query or "").lower().strip()[:40]
 
 
+# Topic categories for the personality profile — related words/phrases grouped
+# under a clean display name. Checked in order (specific → general), so a query
+# about LLMs lands in "Artificial Intelligence" before the broad "Technology".
+# Single short tokens (ai, ml, vc) match as whole words; longer keywords match a
+# token prefix (so "invest" catches "investing"); phrases match as substrings.
+_TOPIC_CATEGORIES: list[tuple[str, tuple[str, ...]]] = [
+    ("Artificial Intelligence", ("ai", "artificial intelligence", "llm", "llms", "gpt",
+        "chatgpt", "claude", "gemini", "openai", "anthropic", "neural", "deep learning",
+        "transformer", "generative", "rag", "chatbot", "prompt", "agentic", "agent", "agents")),
+    ("Machine Learning", ("ml", "machine learning", "dataset", "classifier", "regression",
+        "clustering", "scikit", "pytorch", "tensorflow", "fine-tuning", "fine-tune",
+        "embedding", "embeddings", "model training")),
+    ("Startups & Founders", ("startup", "startups", "founder", "venture capital", "vc",
+        "seed round", "series a", "fundraising", "fundraise", "saas", "mvp", "pitch deck",
+        "y combinator", "bootstrapping")),
+    ("Programming", ("python", "javascript", "typescript", "rust", "golang", "code",
+        "coding", "programming", "developer", "api", "framework", "react", "nodejs",
+        "sql", "database", "git", "debugging", "algorithm", "compiler")),
+    ("Finance & Investing", ("stock", "stocks", "investing", "investment", "crypto",
+        "bitcoin", "ethereum", "portfolio", "trading", "etf", "interest rate", "valuation",
+        "dividend")),
+    ("Business & Marketing", ("business", "marketing", "sales", "strategy", "customer",
+        "b2b", "ecommerce", "advertising", "branding", "revenue", "growth")),
+    ("Science", ("physics", "chemistry", "biology", "quantum", "genetics", "astronomy",
+        "neuroscience", "climate", "experiment", "scientific")),
+    ("Health & Fitness", ("health", "fitness", "diet", "nutrition", "workout", "exercise",
+        "medical", "disease", "symptom", "wellness")),
+    ("News & Current Events", ("news", "latest", "breaking", "election", "politics",
+        "political", "government", "policy", "regulation")),
+    ("Technology", ("technology", "tech", "software", "hardware", "gadget", "computer",
+        "cloud", "cybersecurity", "smartphone", "device")),
+    ("Travel", ("travel", "flight", "flights", "hotel", "vacation", "destination",
+        "tourism", "itinerary")),
+    ("Education & Learning", ("learn", "learning", "course", "courses", "tutorial",
+        "study", "textbook", "university", "degree", "certification")),
+    ("Food & Cooking", ("recipe", "recipes", "cooking", "food", "restaurant", "cuisine",
+        "baking", "meal")),
+    ("Entertainment", ("movie", "movies", "film", "music", "gaming", "videogame", "novel",
+        "celebrity", "netflix")),
+    ("Sports", ("sports", "football", "soccer", "basketball", "nba", "nfl", "tennis",
+        "cricket", "olympics", "baseball")),
+]
+# Generic verbs / filler that should never become a fallback topic on their own.
+_TOPIC_FALLBACK_STOP = {
+    "make", "makes", "made", "analyze", "compare", "explain", "find", "tell", "give",
+    "list", "get", "help", "need", "want", "know", "use", "using", "build", "create",
+    "show", "write", "today", "latest", "recent", "current", "thing", "things", "stuff",
+}
+
+
+def categorize_query(query: str) -> str | None:
+    """Map a query to a clean topic category name (or None if nothing matches)."""
+    q = (query or "").lower()
+    tokens = set(re.findall(r"[a-z0-9+#]+", q))
+    for name, keywords in _TOPIC_CATEGORIES:
+        for kw in keywords:
+            if " " in kw or "-" in kw:
+                if kw in q:                       # multi-word phrase → substring
+                    return name
+            elif len(kw) <= 3:
+                if kw in tokens:                  # short token (ai, ml, vc) → whole word
+                    return name
+            elif any(t == kw or t.startswith(kw) for t in tokens):  # prefix (invest→investing)
+                return name
+    return None
+
+
+def profile_topics(queries: list[str], n: int = 3) -> list[str]:
+    """Return the user's top ``n`` topics as clean phrases (e.g. "Artificial
+    Intelligence", "Startups & Founders") by grouping query words into categories.
+
+    Counts how often each category appears across the user's queries. If fewer
+    than ``n`` categories are found, fills the rest with Title-cased salient words
+    (skipping generic verbs) so the profile still shows meaningful labels.
+    """
+    cat_counts: dict[str, int] = {}
+    fallback_counts: dict[str, int] = {}
+    for q in queries:
+        category = categorize_query(q)
+        if category:
+            cat_counts[category] = cat_counts.get(category, 0) + 1
+            continue
+        word = extract_topic(q)
+        if word and word not in _TOPIC_FALLBACK_STOP and len(word) > 2:
+            label = word.title()
+            fallback_counts[label] = fallback_counts.get(label, 0) + 1
+    topics = [c for c, _ in sorted(cat_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    if len(topics) < n:
+        extra = [w for w, _ in sorted(fallback_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+                 if w not in topics]
+        topics += extra
+    return topics[:n]
+
+
 def record_comparison(
     conn: sqlite3.Connection,
     *,
@@ -1459,10 +1554,11 @@ def build_user_profile(conn: sqlite3.Connection, google_id: str) -> dict:
     ).fetchall()
     comp = {"simple": 0, "medium": 0, "complex": 0}
     words_total, nq = 0, 0
-    topics: dict[str, int] = {}
+    query_texts: list[str] = []
     for original_query, routing in rows:
         nq += 1
         words_total += len((original_query or "").split())
+        query_texts.append(original_query or "")
         complexity = None
         if routing:
             try:
@@ -1473,9 +1569,6 @@ def build_user_profile(conn: sqlite3.Connection, google_id: str) -> dict:
             complexity = classify_query(original_query or "").get("complexity")
         if complexity in comp:
             comp[complexity] += 1
-        topic = extract_topic(original_query or "")
-        if topic:
-            topics[topic] = topics.get(topic, 0) + 1
 
     total = max(1, nq)
     complex_frac = comp["complex"] / total
@@ -1494,7 +1587,7 @@ def build_user_profile(conn: sqlite3.Connection, google_id: str) -> dict:
     preferred_model = "Sonnet" if by_model.get("Sonnet", 0.0) >= by_model.get("Haiku", 0.0) else "Haiku"
     if stats["total_events"] == 0:
         preferred_model = None  # no reward data yet — don't claim a model preference
-    top_topics = [t for t, _ in sorted(topics.items(), key=lambda kv: (-kv[1], kv[0]))[:3]]
+    top_topics = profile_topics(query_texts)
 
     return {
         "expertise_level": expertise,
