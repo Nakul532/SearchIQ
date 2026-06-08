@@ -110,6 +110,30 @@ MAX_RETRIES = 2          # how many rephrase-and-retry rounds per failed query
 DASHBOARD_EVERY = 5      # show the dashboard after this many queries
 LESSON_CONTEXT_LIMIT = 8 # how many recent feedback lessons to feed the model
 
+# --------------------------------------------------------------------------- #
+# Reinforcement-learning reward signals
+# --------------------------------------------------------------------------- #
+# Numeric reward attached to every interaction outcome. Positive = the user was
+# served well; negative = they were not. Aggregated into the Reward dashboard and
+# used to learn a policy (which model + answer style earns the most reward).
+REWARD_SCORES = {
+    "ab_winner":    1.0,   # the answer the user picked in an A/B comparison
+    "ab_loser":    -0.5,   # the answer they passed over
+    "thumbs_up":    1.0,   # 👍 on a single (non-A/B) answer
+    "thumbs_down": -1.0,   # 👎 on a single answer
+    "followup":     0.2,   # user asked a follow-up — engaged enough to continue
+}
+# Bonus reward added when the user explains WHY they preferred an answer.
+REASON_BONUS = {
+    "more accurate":        0.3,
+    "clearer explanation":  0.2,
+    "better sources":       0.1,
+}
+# A/B side → answer style. A is concise/factual, B is detailed/analytical
+# (matches STYLE_A / STYLE_B and the lessons winning_style convention).
+STYLE_OF_SIDE = {"A": "concise", "B": "detailed"}
+POLICY_EVERY = 5         # re-evaluate the policy after every N reward-bearing queries
+
 # Anthropic's built-in server-side web search tool. Runs the search on
 # Anthropic's infrastructure, feeds results into Claude's context, and returns
 # citations — the RAG retrieval layer. GA, no beta header needed.
@@ -354,6 +378,42 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # Reinforcement-learning reward log — one row per reward signal (see
+    # REWARD_SCORES). Powers the Reward dashboard and the learned policy.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rewards (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            interaction_id INTEGER,            -- the interaction this reward is for (may be NULL)
+            query_group    INTEGER,            -- groups rewards by query (for per-query totals)
+            session_id     TEXT,
+            signal         TEXT    NOT NULL,   -- 'ab_winner' | 'ab_loser' | 'thumbs_up' | … | 'reason_bonus'
+            score          REAL    NOT NULL,   -- the numeric reward
+            model          TEXT,               -- 'Haiku' | 'Sonnet' (which model produced the answer)
+            style          TEXT,               -- 'concise' | 'detailed' | NULL (single/followup)
+            query_type     TEXT,               -- 'simple' | 'medium' | 'complex'
+            created_at     TEXT    NOT NULL
+        )
+        """
+    )
+    # Learned policy updates — each row is one re-evaluation that picked the
+    # highest-reward model+style+query_type pattern and adjusted behavior to it.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_updates (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            queries_at  INTEGER,               -- # of reward-bearing queries at update time
+            model       TEXT,                  -- highest-reward model
+            style       TEXT,                  -- highest-reward answer style
+            query_type  TEXT,                  -- query type the pattern applies to
+            avg_reward  REAL,                  -- the pattern's average reward
+            multiplier  REAL,                  -- reward vs. the other patterns (e.g. 2.0 = 2x)
+            text        TEXT    NOT NULL,       -- plain-English policy statement
+            created_at  TEXT    NOT NULL
+        )
+        """
+    )
+
     # Migrations: add columns to pre-existing tables (idempotent).
     def _ensure(table: str, col: str, decl: str) -> None:
         existing = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
@@ -372,7 +432,8 @@ def init_db(conn: sqlite3.Connection) -> None:
 # The app's data tables — used by restore_from_sql to clear the DB before a
 # full import (the backup is a sqlite `.dump`, whose CREATE TABLE statements
 # would otherwise collide with init_db's tables).
-DATA_TABLES = ("interactions", "comparisons", "lessons", "messages")
+DATA_TABLES = ("interactions", "comparisons", "lessons", "messages",
+               "rewards", "policy_updates")
 
 
 def restore_from_sql(conn: sqlite3.Connection, sql_text: str) -> dict[str, int]:
@@ -423,8 +484,9 @@ def record_interaction(
     sources: list[dict] | None = None,
     routing: dict | None = None,
     session_id: str | None = None,
-) -> None:
-    conn.execute(
+) -> int:
+    """Insert a completed interaction (with feedback); return its row id."""
+    cur = conn.execute(
         """
         INSERT INTO interactions
             (query_group, original_query, effective_query, answer,
@@ -446,6 +508,7 @@ def record_interaction(
         ),
     )
     conn.commit()
+    return int(cur.lastrowid)
 
 
 def insert_answer(
@@ -852,6 +915,304 @@ def training_progress(conn: sqlite3.Connection) -> dict:
     learned = conn.execute("SELECT COUNT(*) FROM lessons").fetchone()[0]
     applied = conn.execute("SELECT COALESCE(SUM(applied_count), 0) FROM lessons").fetchone()[0]
     return {"lessons_learned": int(learned), "lessons_applied": int(applied)}
+
+
+# --------------------------------------------------------------------------- #
+# Reinforcement learning — reward log, reward stats, and the learned policy
+# --------------------------------------------------------------------------- #
+def routing_facets(routing: dict | None) -> tuple[str | None, str | None]:
+    """Pull (model_label, complexity) from a routing dict for reward attribution."""
+    if not routing:
+        return None, None
+    model = routing.get("model_label")
+    if not model:
+        m = routing.get("model", "") or ""
+        model = "Sonnet" if m.startswith("claude-sonnet") else "Haiku"
+    return model, routing.get("complexity")
+
+
+def record_reward(
+    conn: sqlite3.Connection,
+    *,
+    signal: str,
+    score: float,
+    interaction_id: int | None = None,
+    query_group: int | None = None,
+    session_id: str | None = None,
+    model: str | None = None,
+    style: str | None = None,
+    query_type: str | None = None,
+) -> int:
+    """Log one reward signal; return its row id. See REWARD_SCORES for the scale."""
+    cur = conn.execute(
+        """
+        INSERT INTO rewards
+            (interaction_id, query_group, session_id, signal, score,
+             model, style, query_type, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            interaction_id, query_group, session_id, signal, float(score),
+            model, style, query_type, _dt.datetime.now().isoformat(timespec="seconds"),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_routing(conn: sqlite3.Connection, interaction_id: int) -> dict | None:
+    """Return the stored routing dict for an interaction (or None)."""
+    row = conn.execute(
+        "SELECT routing FROM interactions WHERE id = ?", (interaction_id,)
+    ).fetchone()
+    if row and row[0]:
+        try:
+            return json.loads(row[0])
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
+def last_interaction(conn: sqlite3.Connection, session_id: str | None) -> dict | None:
+    """Most recent interaction for a session — the answer a follow-up rewards."""
+    if not session_id:
+        return None
+    row = conn.execute(
+        "SELECT id, query_group, routing FROM interactions WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        return None
+    rid, group, routing = row
+    try:
+        rt = json.loads(routing) if routing else None
+    except (json.JSONDecodeError, TypeError):
+        rt = None
+    return {"id": int(rid), "query_group": int(group) if group is not None else None, "routing": rt}
+
+
+def _reward_velocity(group_totals: list[float]) -> float:
+    """Least-squares slope of per-query reward, scaled to 'reward gained per 10 queries'."""
+    n = len(group_totals)
+    if n < 2:
+        return 0.0
+    xs = list(range(n))
+    mean_x = sum(xs) / n
+    mean_y = sum(group_totals) / n
+    denom = sum((x - mean_x) ** 2 for x in xs)
+    if denom == 0:
+        return 0.0
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, group_totals)) / denom
+    return round(slope * 10, 3)
+
+
+def reward_stats(conn: sqlite3.Connection) -> dict:
+    """Aggregate the reward log for the Reward dashboard panel (global, all-time)."""
+    rows = conn.execute(
+        "SELECT query_group, score, model, style, query_type FROM rewards ORDER BY id"
+    ).fetchall()
+    total = len(rows)
+    pos = [r for r in rows if r[1] > 0]
+    neg = [r for r in rows if r[1] < 0]
+    avg = (sum(r[1] for r in rows) / total) if total else 0.0
+
+    def _avg_by(idx: int) -> dict[str, float]:
+        buckets: dict[str, list[float]] = {}
+        for r in rows:
+            key = r[idx]
+            if key is None:
+                continue
+            buckets.setdefault(key, []).append(r[1])
+        return {k: round(sum(v) / len(v), 3) for k, v in buckets.items()}
+
+    by_model = _avg_by(2)
+    by_style = _avg_by(3)
+    by_query_type = _avg_by(4)
+
+    # Per-query-group total reward, in chronological (id) order, with running avg.
+    group_order: list[int] = []
+    group_totals: dict[int, float] = {}
+    for group, score, *_ in rows:
+        g = group if group is not None else -1
+        if g not in group_totals:
+            group_totals[g] = 0.0
+            group_order.append(g)
+        group_totals[g] += score
+
+    timeline = []
+    running_sum = 0.0
+    for i, g in enumerate(group_order, start=1):
+        running_sum += group_totals[g]
+        timeline.append({"group": g, "score": round(group_totals[g], 3), "avg": round(running_sum / i, 3)})
+
+    return {
+        "total_events": total,
+        "avg_score": round(avg, 3),
+        "positive_count": len(pos),
+        "negative_count": len(neg),
+        "positive_sum": round(sum(r[1] for r in pos), 3),
+        "negative_sum": round(sum(r[1] for r in neg), 3),
+        "by_model": {"Haiku": by_model.get("Haiku", 0.0), "Sonnet": by_model.get("Sonnet", 0.0)},
+        "by_query_type": {k: by_query_type.get(k, 0.0) for k in ("simple", "medium", "complex")},
+        "by_style": {k: by_style.get(k, 0.0) for k in ("concise", "detailed")},
+        "timeline": timeline,
+        "learning_velocity": _reward_velocity([group_totals[g] for g in group_order]),
+    }
+
+
+def compute_best_pattern(conn: sqlite3.Connection) -> dict | None:
+    """Find the model+style+query_type combo with the highest average reward."""
+    rows = conn.execute(
+        """
+        SELECT model, style, query_type, AVG(score) AS avg_score, COUNT(*) AS n
+        FROM rewards
+        WHERE model IS NOT NULL AND style IS NOT NULL
+        GROUP BY model, style, query_type
+        ORDER BY avg_score DESC
+        """
+    ).fetchall()
+    if not rows:
+        return None
+    model, style, query_type, best_avg, n = rows[0]
+    # Multiplier = best avg vs. the mean of the other patterns (only when both positive).
+    multiplier = None
+    others = [r[3] for r in rows[1:]]
+    if best_avg > 0 and others:
+        other_mean = sum(others) / len(others)
+        if other_mean > 0:
+            multiplier = round(best_avg / other_mean, 1)
+    return {
+        "model": model,
+        "style": style,
+        "query_type": query_type or "general",
+        "avg_reward": round(best_avg, 3),
+        "multiplier": multiplier,
+        "samples": int(n),
+    }
+
+
+def _policy_text(pattern: dict) -> str:
+    """Plain-English statement of a learned policy, e.g. the lessons-feed line."""
+    style_word = "Detailed" if pattern["style"] == "detailed" else "Concise"
+    qt = pattern["query_type"]
+    scope = "queries" if qt == "general" else f"{qt} queries"
+    if pattern.get("multiplier") and pattern["multiplier"] >= 1.5:
+        return f"{style_word} {pattern['model']} answers get {pattern['multiplier']:g}x reward for {scope}"
+    return (f"{style_word} {pattern['model']} answers earn the highest reward "
+            f"(avg {pattern['avg_reward']:+.2f}) for {scope}")
+
+
+def maybe_update_policy(conn: sqlite3.Connection) -> dict | None:
+    """Re-evaluate the policy after every POLICY_EVERY reward-bearing queries.
+
+    Picks the highest-reward pattern, records a policy_updates row, and upserts a
+    visible line into the lessons feed. Returns the pattern (with its plain-English
+    ``text``) when an update happens, else None. Idempotent within a checkpoint.
+    """
+    n = int(conn.execute(
+        "SELECT COUNT(DISTINCT query_group) FROM rewards WHERE query_group IS NOT NULL"
+    ).fetchone()[0])
+    if n == 0 or n % POLICY_EVERY != 0:
+        return None
+    last = conn.execute("SELECT queries_at FROM policy_updates ORDER BY id DESC LIMIT 1").fetchone()
+    if last and last[0] is not None and int(last[0]) >= n:
+        return None  # already updated at this checkpoint
+    pattern = compute_best_pattern(conn)
+    if not pattern:
+        return None
+
+    text = _policy_text(pattern)
+    now = _dt.datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        """
+        INSERT INTO policy_updates
+            (queries_at, model, style, query_type, avg_reward, multiplier, text, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (n, pattern["model"], pattern["style"], pattern["query_type"],
+         pattern["avg_reward"], pattern.get("multiplier"), text, now),
+    )
+    # Log the policy change into the existing lessons feed (upsert by topic), so it
+    # shows up alongside preference lessons. topic 'policy:*' never matches a query
+    # (match_lessons does substring matching), so it stays display-only.
+    topic = f"policy:{pattern['query_type']}"
+    feed_text = f"Policy: {text}"
+    winning_style = "B" if pattern["style"] == "detailed" else "A"
+    existing = conn.execute("SELECT id FROM lessons WHERE topic = ?", (topic,)).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE lessons SET text = ?, winning_style = ? WHERE id = ?",
+            (feed_text, winning_style, int(existing[0])),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO lessons (session_id, topic, winning_style, reason, text, applied_count, created_at)
+            VALUES (NULL, ?, ?, NULL, ?, 0, ?)
+            """,
+            (topic, winning_style, feed_text, now),
+        )
+    conn.commit()
+    pattern["text"] = text
+    return pattern
+
+
+def current_policy(conn: sqlite3.Connection) -> dict | None:
+    """The most recent learned policy (or None if none has been set yet)."""
+    row = conn.execute(
+        """
+        SELECT model, style, query_type, avg_reward, multiplier, text, created_at
+        FROM policy_updates ORDER BY id DESC LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return None
+    keys = ["model", "style", "query_type", "avg_reward", "multiplier", "text", "created_at"]
+    return dict(zip(keys, row))
+
+
+def policy_directive(conn: sqlite3.Connection) -> str:
+    """A system-prompt note steering answers toward the policy's winning style.
+
+    Prepended to the lessons list so it flows through build_system_prompt into BOTH
+    A/B drafts. Returns "" when no policy exists.
+    """
+    p = current_policy(conn)
+    if not p:
+        return ""
+    style_word = ("detailed, analytical and well-structured" if p["style"] == "detailed"
+                  else "concise, factual and skimmable")
+    qt = p.get("query_type")
+    scope = "all queries" if qt in (None, "general") else f"{qt} queries"
+    return (f"LEARNED POLICY (from user reward signals): for {scope}, users most reward "
+            f"{style_word} answers — lean toward that where it fits the question.")
+
+
+def apply_policy(conn: sqlite3.Connection, routing: dict) -> dict:
+    """Bias model routing toward the current policy's highest-reward model.
+
+    When a policy exists, applies to this query's complexity (or is general), and
+    prefers a different model than the rule-based router chose, swap the model in
+    while keeping the complexity tier. Sets routing["policy_biased"]=True so the UI
+    can flag it. No-op when there's no policy or it already agrees with the router.
+    """
+    p = current_policy(conn)
+    if not p or not routing:
+        return routing
+    qt = p.get("query_type")
+    if qt not in (None, "general", routing.get("complexity")):
+        return routing
+    target_label = p.get("model")
+    if target_label not in ("Haiku", "Sonnet") or routing.get("model_label") == target_label:
+        return routing
+    complexity = routing.get("complexity", "medium")
+    tier = TIERS.get(complexity, TIERS["medium"])
+    biased = dict(routing)
+    biased["model"] = SONNET_MODEL if target_label == "Sonnet" else HAIKU_MODEL
+    biased["model_label"] = target_label
+    biased["badge"] = f"{tier['icon']} {complexity.capitalize()} · {target_label} · {tier['mode']}"
+    biased["policy_biased"] = True
+    return biased
 
 
 # --------------------------------------------------------------------------- #

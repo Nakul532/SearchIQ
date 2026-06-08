@@ -149,6 +149,48 @@
           </div>
         </div>
 
+        <!-- Reinforcement-learning reward signals -->
+        <div class="card reward-card">
+          <div class="card-label">🎯 Reward signal <span class="muted">(RL)</span></div>
+
+          <div class="reward-chart-wrap">
+            <svg id="rewardChart" class="reward-chart" viewBox="0 0 300 96" preserveAspectRatio="none" aria-hidden="true"></svg>
+            <div id="rewardChartEmpty" class="reward-chart-empty">No reward data yet — pick a winner</div>
+          </div>
+          <div class="reward-chart-cap">Average reward over time</div>
+
+          <div class="reward-headline">
+            <div class="reward-stat">
+              <div class="reward-stat-value" id="rewardAvg">0.00</div>
+              <div class="reward-stat-label">Avg reward</div>
+            </div>
+            <div class="reward-stat">
+              <div class="reward-stat-value" id="rewardVelocity">+0.00</div>
+              <div class="reward-stat-label">Velocity / 10q</div>
+            </div>
+          </div>
+
+          <div class="reward-posneg">
+            <div class="rpn pos"><b id="rewardPos">0</b> <span>positive</span></div>
+            <div class="rpn neg"><b id="rewardNeg">0</b> <span>negative</span></div>
+          </div>
+
+          <div class="reward-break">
+            <div class="rb-title">By model</div>
+            <div class="rb-bars" id="rewardByModel"></div>
+          </div>
+          <div class="reward-break">
+            <div class="rb-title">By query type</div>
+            <div class="rb-bars" id="rewardByType"></div>
+          </div>
+          <div class="reward-break">
+            <div class="rb-title">By answer style</div>
+            <div class="rb-bars" id="rewardByStyle"></div>
+          </div>
+
+          <div id="rewardPolicy" class="reward-policy" hidden></div>
+        </div>
+
         <div class="card">
           <div class="card-label">📚 Lessons learned <span class="muted">(live)</span></div>
           <ul id="lessonsFeed" class="lessons-feed">

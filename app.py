@@ -104,6 +104,9 @@ def metrics_payload(conn: sqlite3.Connection) -> dict:
     # Visible learning loop: lessons feed + training-progress totals (global).
     m["lessons_feed"] = sa.all_lessons(conn)
     m["training_progress"] = sa.training_progress(conn)
+    # Reinforcement-learning reward signals + the current learned policy.
+    m["reward"] = sa.reward_stats(conn)
+    m["policy"] = sa.current_policy(conn)
     return m
 
 
@@ -159,6 +162,7 @@ def api_query():
     data = request.get_json(silent=True) or {}
     query = str(data.get("query", "")).strip()
     force = bool(data.get("force"))  # bypass the clarifying-question check
+    followup = bool(data.get("followup"))  # query came from a follow-up chip
     conversation_id = str(data.get("conversation_id", "")).strip()
     sid = session_id()
     if not query:
@@ -175,6 +179,19 @@ def api_query():
 
     conn = db()
     try:
+        # Reward the PRIOR answer when this query is a follow-up — the user was
+        # engaged enough to keep going (+0.2). Attributed before we record the new
+        # turn, so it lands on the answer that prompted the continuation.
+        if followup:
+            prev = sa.last_interaction(conn, sid)
+            if prev:
+                p_model, p_qtype = sa.routing_facets(prev["routing"])
+                sa.record_reward(
+                    conn, signal="followup", score=sa.REWARD_SCORES["followup"],
+                    interaction_id=prev["id"], query_group=prev["query_group"],
+                    session_id=sid, model=p_model, query_type=p_qtype,
+                )
+
         # Load prior turns for context (this question is saved only after the
         # answers come back, so a transient API failure leaves no dangling turn).
         history = sa.conversation_history(conn, conversation_id, limit=10)
@@ -182,10 +199,14 @@ def api_query():
         group = sa.next_query_group(conn)
         # Apply lessons the whole system has learned from past preferences on similar queries.
         applied = sa.match_lessons(conn, query)
-        lesson_texts = [l["text"] for l in applied]
         applied_ids = [l["id"] for l in applied]
-        # Pre-processor step 2: classify complexity → choose the aggregation model.
-        routing = sa.classify_query(query)
+        # Pre-processor step 2: classify complexity → choose the aggregation model,
+        # then let the learned policy bias the model toward the highest-reward one.
+        routing = sa.apply_policy(conn, sa.classify_query(query))
+        # Steer BOTH drafts toward the policy's winning style via the system prompt
+        # (prepended to the matched lessons, which build_system_prompt renders).
+        directive = sa.policy_directive(conn)
+        lesson_texts = ([directive] if directive else []) + [l["text"] for l in applied]
         try:
             answers = sa.generate_ab_answers(client, query, lesson_texts, routing, history=history)
         except anthropic.APIError as exc:
@@ -291,18 +312,34 @@ def api_prefer():
 
         sa.set_preference(conn, int(comparison_id), preferred)
         # Winner = thumbs up (attempt 1), loser = thumbs down (attempt 2).
-        sa.record_interaction(
+        win_id = sa.record_interaction(
             conn, query_group=comp["query_group"], original_query=comp["original_query"],
             effective_query=comp["effective_query"], answer=win_answer, feedback="up",
             comment=None, attempt=1, sources=_src(win_sources), routing=routing,
             session_id=comp["session_id"],
         )
-        sa.record_interaction(
+        lose_id = sa.record_interaction(
             conn, query_group=comp["query_group"], original_query=comp["original_query"],
             effective_query=comp["effective_query"], answer=lose_answer, feedback="down",
             comment=None, attempt=2, sources=_src(lose_sources), routing=routing,
             session_id=comp["session_id"],
         )
+
+        # Reward signals: winner +1.0, loser -0.5 (A = concise, B = detailed).
+        r_model, r_qtype = sa.routing_facets(routing)
+        loser_side = "B" if preferred == "A" else "A"
+        sa.record_reward(
+            conn, signal="ab_winner", score=sa.REWARD_SCORES["ab_winner"],
+            interaction_id=win_id, query_group=comp["query_group"], session_id=comp["session_id"],
+            model=r_model, style=sa.STYLE_OF_SIDE[preferred], query_type=r_qtype,
+        )
+        sa.record_reward(
+            conn, signal="ab_loser", score=sa.REWARD_SCORES["ab_loser"],
+            interaction_id=lose_id, query_group=comp["query_group"], session_id=comp["session_id"],
+            model=r_model, style=sa.STYLE_OF_SIDE[loser_side], query_type=r_qtype,
+        )
+        # Re-evaluate the policy after every POLICY_EVERY reward-bearing queries.
+        policy_update = sa.maybe_update_policy(conn)
 
         # The winning answer becomes the assistant's turn in the conversation
         # transcript — so it's part of the memory passed to future questions.
@@ -320,6 +357,7 @@ def api_prefer():
             "status": "ok",
             "preferred": preferred,
             "followups": followups,
+            "policy_update": policy_update,
             "metrics": metrics_payload(conn),
         })
     finally:
@@ -348,6 +386,19 @@ def api_prefer_reason():
             return json_error("Record a preference before a reason.", 400, "invalid_request")
 
         sa.set_reason(conn, int(comparison_id), reason)
+
+        # Reward bonus for explaining the preference (more accurate +0.3, clearer
+        # +0.2, better sources +0.1) — credited to the winning answer's style.
+        bonus = sa.REASON_BONUS.get(reason.lower())
+        if bonus:
+            routing = json.loads(comp["routing"]) if comp["routing"] else None
+            b_model, b_qtype = sa.routing_facets(routing)
+            sa.record_reward(
+                conn, signal="reason_bonus", score=bonus,
+                query_group=comp["query_group"], session_id=comp["session_id"],
+                model=b_model, style=sa.STYLE_OF_SIDE.get(comp["preferred"]), query_type=b_qtype,
+            )
+
         topic = sa.extract_topic(comp["original_query"])
         lesson = sa.record_lesson(
             conn, topic=topic, winning_style=comp["preferred"], reason=reason,
@@ -380,6 +431,19 @@ def api_feedback():
     conn = db()
     try:
         sa.set_feedback(conn, int(interaction_id), feedback, comment)
+
+        # Reward signal for a thumbs vote on a single (non-A/B) answer: 👍 +1.0,
+        # 👎 -1.0. Style is unknown for a single answer, so it's left NULL; model
+        # and query type come from the interaction's stored routing.
+        fb_routing = sa.get_routing(conn, int(interaction_id))
+        fb_model, fb_qtype = sa.routing_facets(fb_routing)
+        sa.record_reward(
+            conn, signal="thumbs_up" if feedback == "up" else "thumbs_down",
+            score=sa.REWARD_SCORES["thumbs_up" if feedback == "up" else "thumbs_down"],
+            interaction_id=int(interaction_id), query_group=int(group_id),
+            session_id=session_id(), model=fb_model, query_type=fb_qtype,
+        )
+        policy_update = sa.maybe_update_policy(conn)
 
         retry = None
         learning = False
@@ -441,6 +505,7 @@ def api_feedback():
                 "status": "ok",
                 "learning": learning,
                 "retry": retry,
+                "policy_update": policy_update,
                 "metrics": metrics_payload(conn),
             }
         )
@@ -497,7 +562,8 @@ def api_reset():
     """
     conn = db()
     try:
-        for table in ("interactions", "comparisons", "lessons", "messages"):
+        # Clears every data table (incl. rewards + policy_updates) for a clean demo.
+        for table in sa.DATA_TABLES:
             conn.execute(f"DELETE FROM {table}")
         conn.commit()
         return jsonify({"status": "ok", "metrics": metrics_payload(conn)})
