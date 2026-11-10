@@ -1,0 +1,46 @@
+{
+ "C": {
+  "high": {
+   "right": 24,
+   "partly": 2,
+   "n": 27
+  },
+  "medium": {
+   "right": 0,
+   "partly": 0,
+   "n": 0
+  },
+  "low": {
+   "right": 6,
+   "partly": 0,
+   "n": 10
+  },
+  "none": {
+   "right": 1,
+   "partly": 0,
+   "n": 3
+  }
+ },
+ "D": {
+  "high": {
+   "right": 27,
+   "partly": 2,
+   "n": 30
+  },
+  "medium": {
+   "right": 0,
+   "partly": 0,
+   "n": 0
+  },
+  "low": {
+   "right": 5,
+   "partly": 0,
+   "n": 5
+  },
+  "none": {
+   "right": 2,
+   "partly": 0,
+   "n": 5
+  }
+ }
+}

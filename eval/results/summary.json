@@ -50,6 +50,23 @@
   "cost_mean": 0.00027247,
   "tavily": 10
  },
+ "recent|D": {
+  "n": 10,
+  "correct_pct": 95.0,
+  "fully_correct": 9,
+  "grounded_pct": 100.0,
+  "trick_pass": [
+   0,
+   0
+  ],
+  "unneeded_refusals": [
+   0,
+   10
+  ],
+  "latency_med": 2.9505,
+  "cost_mean": 0.00027247,
+  "tavily": 10
+ },
  "stable|A": {
   "n": 10,
   "correct_pct": 95.0,
@@ -85,6 +102,23 @@
   "tavily": 10
  },
  "stable|C": {
+  "n": 10,
+  "correct_pct": 95.0,
+  "fully_correct": 9,
+  "grounded_pct": 95.0,
+  "trick_pass": [
+   0,
+   0
+  ],
+  "unneeded_refusals": [
+   0,
+   10
+  ],
+  "latency_med": 3.2815000000000003,
+  "cost_mean": 0.00025675,
+  "tavily": 10
+ },
+ "stable|D": {
   "n": 10,
   "correct_pct": 95.0,
   "fully_correct": 9,
@@ -152,6 +186,23 @@
   "cost_mean": 0.00026617,
   "tavily": 10
  },
+ "multistep|D": {
+  "n": 10,
+  "correct_pct": 70.0,
+  "fully_correct": 7,
+  "grounded_pct": 75.0,
+  "trick_pass": [
+   0,
+   0
+  ],
+  "unneeded_refusals": [
+   3,
+   10
+  ],
+  "latency_med": 3.1705,
+  "cost_mean": 0.00026617,
+  "tavily": 10
+ },
  "trick|A": {
   "n": 10,
   "correct_pct": 80.0,
@@ -203,6 +254,23 @@
   "cost_mean": 0.00026398000000000003,
   "tavily": 10
  },
+ "trick|D": {
+  "n": 10,
+  "correct_pct": 90.0,
+  "fully_correct": 9,
+  "grounded_pct": 70.0,
+  "trick_pass": [
+   4,
+   10
+  ],
+  "unneeded_refusals": [
+   0,
+   0
+  ],
+  "latency_med": 4.186,
+  "cost_mean": 0.0005066199999999999,
+  "tavily": 10
+ },
  "all|A": {
   "n": 40,
   "correct_pct": 58.75,
@@ -252,6 +320,23 @@
   ],
   "latency_med": 2.942,
   "cost_mean": 0.0002648425,
+  "tavily": 40
+ },
+ "all|D": {
+  "n": 40,
+  "correct_pct": 87.5,
+  "fully_correct": 34,
+  "grounded_pct": 85.0,
+  "trick_pass": [
+   4,
+   10
+  ],
+  "unneeded_refusals": [
+   3,
+   30
+  ],
+  "latency_med": 3.3440000000000003,
+  "cost_mean": 0.0003255025,
   "tavily": 40
  }
 }

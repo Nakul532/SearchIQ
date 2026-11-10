@@ -61,3 +61,24 @@ A3/C: C2 G2 D0
 A4/C: C2 G2 D0
 A5/C: C2 G2 D0
 Judging done.
+C1/D: inherited C2 G2
+C2/D: inherited C2 G2
+C3/D: inherited C2 G2
+C4/D: inherited C2 G2
+C5/D: inherited C2 G2
+K1/D: inherited C2 G2
+K2/D: C0 G2 D1
+K3/D: inherited C2 G2
+K4/D: inherited C2 G2
+K5/D: C0 G2 D0
+E1/D: inherited C2 G2
+E2/D: inherited C2 G2
+E3/D: inherited C2 G2
+E4/D: inherited C0 G0
+E5/D: inherited C0 G1
+A1/D: inherited C2 G2
+A2/D: inherited C2 G2
+A3/D: inherited C2 G2
+A4/D: inherited C2 G2
+A5/D: C2 G2 D0
+Judging done.

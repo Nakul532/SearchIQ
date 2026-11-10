@@ -1,6 +1,15 @@
 "use strict";
 
-const ARM_COLORS = { A: "var(--tr-a)", B: "var(--tr-b)", C: "var(--tr-c)" };
+const ARM_COLORS = { A: "var(--tr-a)", B: "var(--tr-b)", C: "var(--tr-c)", D: "var(--tr-d)" };
+const LEVELS = [["high", "HIGH"], ["medium", "MEDIUM"], ["low", "LOW"], ["none", "No checkable claims"]];
+
+function calibrationTable(cal, note) {
+  if (!cal || !Object.keys(cal).length) return "";
+  const arms = Object.keys(cal);
+  const cell = (v) => v && v.n ? `<b>right ${v.right} of ${v.n}</b> <span class="tr-n">${pct(100 * v.right / v.n)}</span>` : `<span class="tr-n">none labelled</span>`;
+  const rows = LEVELS.map(([k, label]) => `<tr><th scope="row"><span class="conf conf-${k}">${label}</span></th>${arms.map((a) => `<td>${cell(cal[a][k])}</td>`).join("")}</tr>`).join("");
+  return `<div class="tr-cal"><table><thead><tr><th>Label shown</th>${arms.map((a) => `<th>Arm ${a}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>${note ? `<p class="tr-note">${note}</p>` : ""}</div>`;
+}
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pct = (v) => (v == null ? "–" : `${Math.round(v)}%`);
@@ -15,20 +24,24 @@ function summaryCards(data) {
   for (const s of data.sets) {
     if (!s.overall) continue;
     const o = s.overall.arms;
-    const best = o.C ? "C" : "B";
+    const best = o.D ? "D" : o.C ? "C" : "B";  // the arm that is live
     out.push(card(`${s.label}: SearchIQ correct`, pct(o[best].correct_pct),
-      `vs ${pct(o.A.correct_pct)} for the model alone · ${s.n_questions} questions`));
+      `vs ${pct(o.A.correct_pct)} for the model alone · ${s.n_questions} questions · as live today (arm ${best})`));
   }
   const business = data.sets.find((s) => s.key === "business");
   const pc = business && business.groups.find((g) => g.key === "postcutoff");
   if (pc) out.push(card("Facts after the model's cutoff", pct(pc.arms.B.correct_pct),
     `vs ${pct(pc.arms.A.correct_pct)} without search`));
+  const calD = data.calibration_all && (data.calibration_all.D || data.calibration_all.C);
+  if (calD && calD.high && calD.high.n) out.push(card("When it says HIGH confidence",
+    `${calD.high.right}/${calD.high.n}`, `answers fully right (${pct(100 * calD.high.right / calD.high.n)}), both sets`));
   const core = data.sets.find((s) => s.key === "core");
   const trick = core && core.groups.find((g) => g.key === "trick");
   if (trick) {
-    const arm = trick.arms.C ? "C" : "B";
+    const arm = trick.arms.D ? "D" : trick.arms.C ? "C" : "B";
     out.push(card("Trick questions handled", pct(trick.arms[arm].correct_pct),
-      `vs ${pct(trick.arms.A.correct_pct)} without search: <b>search can mislead here</b>`));
+      arm === "D" ? `vs ${pct(trick.arms.B.correct_pct)} before the rewrite, ${pct(trick.arms.A.correct_pct)} without search`
+      : `vs ${pct(trick.arms.A.correct_pct)} without search: <b>search can mislead here</b>`));
   }
   return out.join("");
 }
@@ -56,9 +69,10 @@ function setSection(s, armNames) {
   const misses = s.misses.length ? s.misses.map((m) => {
     const sc = ["A", "B", "C"].filter((a) => m.scores[a] != null)
       .map((a) => `<span class="tr-score s${m.scores[a]}">${a}: ${SCORE[m.scores[a]]}</span>`).join("");
+    const rw = m.rewritten ? `<div class="tr-miss-check">✎ Rewritten by the check in arm D</div>` : "";
     const chk = m.check ? `<div class="tr-miss-check">v2 check: ${esc(m.check.level)} confidence${m.check.premise_flagged ? " · <b>premise flagged</b>" : ""}</div>` : "";
     return `<li class="tr-miss"><div class="tr-miss-q"><span class="tr-tag">${esc(m.group)}</span> ${esc(m.question)}</div>
-      <div class="tr-scores">${sc}</div><div class="tr-miss-why">Judge on B: ${esc(m.why)}</div>${chk}</li>`;
+      <div class="tr-scores">${sc}</div><div class="tr-miss-why">Judge on B: ${esc(m.why)}</div>${chk}${rw}</li>`;
   }).join("") : `<li class="tr-miss">No misses in this set.</li>`;
   let checker = "";
   const c = s.checker;
@@ -78,6 +92,7 @@ function setSection(s, armNames) {
     <div class="tr-legend">${legend}</div>
     <h3>Correct vs the answer key, by question type</h3>
     <div class="tr-groups">${rows}</div>
+    ${s.calibration ? `<h3>Are the confidence labels honest? (this set)</h3>${calibrationTable(s.calibration, s.rewritten ? `Arm D rewrote ${s.rewritten} of ${s.n_questions} answers.` : "")}` : ""}
     ${checker}
     <details class="tr-misses"><summary>Every miss (${s.misses.length}): where SearchIQ wasn't fully right, or search made it worse</summary><ul>${misses}</ul></details>
   </section>`;
@@ -107,6 +122,14 @@ function method(data) {
     if (!res.ok) throw new Error(res.status);
     const data = await res.json();
     sum.innerHTML = summaryCards(data);
+    if (data.calibration_all && Object.keys(data.calibration_all).length) {
+      const cal = document.createElement("section");
+      cal.className = "tr-panel";
+      cal.innerHTML = `<h2>Are the confidence labels honest?</h2>
+        <p class="tr-note">Every SearchIQ answer carries a confidence label. If the labels mean anything, answers marked HIGH should be right far more often than answers marked LOW. "Right" = the judge scored the answer fully correct against the locked key. Both question sets combined.</p>
+        ${calibrationTable(data.calibration_all, esc(data.calibration_note || ""))}`;
+      sum.after(cal);
+    }
     document.getElementById("tr-sets").innerHTML = data.sets.map((s) => setSection(s, data.arms)).join("");
     document.getElementById("tr-method").innerHTML = method(data);
   } catch (e) {

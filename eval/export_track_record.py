@@ -35,7 +35,8 @@ SETS = {
 NAMES = {"companies": "Companies", "markets": "Markets", "earnings": "Earnings", "acquisitions": "Acquisitions",
          "trick": "Trick questions", "postcutoff": "† After the model's cutoff", "recent": "Recent events",
          "stable": "Stable facts (control)", "multistep": "Multi-step", "all": "Overall"}
-ARMS = {"A": "Model alone (no search)", "B": "SearchIQ: search + cited answer", "C": "SearchIQ v2: B + claim check"}
+ARMS = {"A": "Model alone (no search)", "B": "SearchIQ: search + cited answer", "C": "SearchIQ v2: B + claim check",
+        "D": "SearchIQ v2: the check rewrites flagged answers (live today)"}
 
 
 def jl(path):
@@ -59,7 +60,8 @@ def build_set(key: str, cfg: dict) -> dict:
     qs = {q["id"]: q for q in jl(os.path.join(HERE, cfg["questions"]))}
     judge = {(r["id"], r["arm"]): r for r in jl(os.path.join(d, "judge.jsonl"))}
     arm_c = {r["id"]: r for r in jl(os.path.join(d, "arm_c.jsonl"))}
-    arms = [a for a in ("A", "B", "C") if f"all|{a}" in summary]
+    arm_d = {r["id"]: r for r in jl(os.path.join(d, "arm_d.jsonl"))}
+    arms = [a for a in ("A", "B", "C", "D") if f"all|{a}" in summary]
 
     def row(g):
         return {"key": g, "name": NAMES[g],
@@ -75,12 +77,14 @@ def build_set(key: str, cfg: dict) -> dict:
         jb, ja = judge.get((qid, "B")), judge.get((qid, "A"))
         if not jb:
             continue
-        if jb["correctness"] < 2 or (ja and ja["correctness"] > jb["correctness"]):
+        jd = judge.get((qid, "D"))
+        if jb["correctness"] < 2 or (ja and ja["correctness"] > jb["correctness"]) or (jd and jd["correctness"] < 2):
             jc = judge.get((qid, "C"))
             c = (arm_c.get(qid) or {}).get("check")
             misses.append({
                 "id": qid, "group": NAMES.get(q["group"], q["group"]), "question": q["question"],
-                "scores": {a: j["correctness"] for a, j in (("A", ja), ("B", jb), ("C", jc)) if j},
+                "scores": {a: j["correctness"] for a, j in (("A", ja), ("B", jb), ("C", jc), ("D", jd)) if j},
+                "rewritten": bool((arm_d.get(qid) or {}).get("revised")),
                 "why": jb.get("rationale", ""),
                 "check": None if not c else {"level": c["sides"]["B"]["confidence"]["level"],
                                              "premise_flagged": not c["premise"]["ok"]},
@@ -91,6 +95,8 @@ def build_set(key: str, cfg: dict) -> dict:
         "overall": row("all") if "all|A" in summary else None,
         "misses": misses,
         "checker": js(os.path.join(d, "checker_diagnostics.json")),
+        "calibration": js(os.path.join(d, "calibration.json")),
+        "rewritten": sum(bool(r.get("revised")) for r in arm_d.values()),
     }
 
 
@@ -103,12 +109,27 @@ def main() -> None:
         "models": {"answers": "GPT-OSS 20B (temperature 0)", "judge": "GPT-OSS 120B", "host": "Groq"},
         "locked": [{"what": "General set + rubric", "commit": "b4f6182"},
                    {"what": "Business set", "commit": "dac4e28"},
-                   {"what": "Arm C definition", "commit": "e8736d8"}],
+                   {"what": "Arm C definition", "commit": "e8736d8"},
+                   {"what": "Arm D + calibration", "commit": "d86c89c"}],
         "links": {"method": f"{REPO}/blob/main/eval/README.md", "raw": f"{REPO}/tree/main/eval",
                   "rubric": f"{REPO}/blob/main/eval/rubric.md"},
         "agreement": agreement,
         "sets": [build_set(k, v) for k, v in SETS.items()],
     }
+    # Calibration across both sets (the headline for the confidence labels).
+    both = {}
+    for st in data["sets"]:
+        for arm, levels in (st.get("calibration") or {}).items():
+            for lv, v in levels.items():
+                t = both.setdefault(arm, {}).setdefault(lv, {"right": 0, "partly": 0, "n": 0})
+                for k in t:
+                    t[k] += v[k]
+    data["calibration_all"] = both
+    data["calibration_note"] = (
+        "Read honestly: HIGH means something (right about 9 times in 10). LOW does not yet mean \"probably wrong\". "
+        "With claim checking alone (C), LOW answers were right 8 of 13. After rewrites (D), all 5 LOW answers were right: "
+        "they're corrected trick answers whose correct claims (\"no human has walked on Mars\") just aren't stated in the "
+        "sources. MEDIUM was never assigned. Treat LOW as \"verify this\", not as \"this is wrong\".")
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
     print(f"Wrote {OUT}")

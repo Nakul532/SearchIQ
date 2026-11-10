@@ -4,6 +4,8 @@
 
 **Arm C (the v2 claim check)** leaves correctness unchanged: 80% core and 85% business, the same as B. That's by design, because it doesn't rewrite the answer. What it does is flag the risky answers. Across both sets it marked 8 of the 12 answers B got wrong (confidence below High or a premise warning), and it raised a premise warning on 9 of 10 core trick questions. The cost: it also flagged 9 of 48 answers B got right, and the judge didn't give credit for the warnings (trick correctness stays 60%). See [Arm C](#arm-c-searchiq-v2-claim-check).
 
+**Arm D (the check rewrites flagged answers, live now)** fixes most of the trick failures: core trick correctness goes 60% → 90%, and core overall 80% → 87.5%. But it costs one business answer, so business drops 85% → 80%: on K5 a correct "a future price can't be known" was rewritten into speculative 2035 price forecasts. **Calibration:** answers labelled HIGH were right 43 of 49 times in D (39 of 43 in C). LOW is not a reliable "wrong" signal, and MEDIUM was never assigned. See [Arm D](#arm-d-the-check-rewrites-flagged-answers) and [Calibration](#calibration-are-the-confidence-labels-honest).
+
 A and B are the **baseline**: SearchIQ v2 wording, before any agent features. Arm C adds the v2 claim check ([arm_c.md](arm_c.md), locked in `e8736d8` before it ran).
 
 ## Method
@@ -95,8 +97,49 @@ Every other group matches B on correctness. Groundedness moved on 7 answers, bot
 
 **Per-group read:**
 - **Trick:** the check spots false premises well (9 of 10 core trick questions), but it doesn't fix the answer. A user who reads the warning is protected; the text below it still accepts the premise. The next step is to have the warning rewrite or withhold the answer, then re-run this arm.
-- **What it misses:** 4 of the 12 wrong answers were labelled High confidence. Two were incomplete rather than false (R3 omits the performer; M9 omits the founding year), and a claim check can't see a missing element. In S9 a wrong side detail wasn't extracted as a claim. In E4 the Tesla delivery figure matched a source carrying the wrong number.
+- **What it misses:** 4 of the 12 wrong answers were labelled High confidence. Two were incomplete rather than false (R3 omits the performer; M9 omits the founding year), and a claim check can't see a missing element. In S9 a wrong side detail wasn't extracted as a claim. In E4 the answer gave Tesla's 2023 production figure as deliveries, and the check accepted it because the number does appear in a source.
 - **Cost:** about +0.8s and ~1.8K tokens per answer on GPT-OSS 20B.
+
+## Arm D: the check rewrites flagged answers
+
+Defined in [arm_d.md](arm_d.md), locked in `d86c89c` before it ran. When C's check flags a false premise or a contradicted claim, the answer is rewritten (correct the premise, remove or correct contradicted claims, add nothing new) and re-checked. Unflagged answers are identical to C and inherit C's verdict. 12 of 60 answers were rewritten: 9 of the 10 core trick questions (all but T8), plus K2, K5 and A5 from the business set.
+
+| Set | Arm | Correct | Fully correct | Grounded | Median latency |
+|---|---|---|---|---|---|
+| Core (40) | B | 80.0% | 31/40 | 88.8% | 2.16s |
+| | C | 80.0% | 31/40 | 82.5% | 2.94s |
+| | **D** | **87.5%** | **34/40** | 85.0% | 3.34s |
+| Core trick (10) | B / C | 60% | 6/10 | 80% / 60% | |
+| | **D** | **90%** | **9/10** | 70% | 4.19s |
+| Business (20) | B / C | 85.0% | 17/20 | 90.0% / 92.5% | |
+| | D | 80.0% | 16/20 | 92.5% | 3.38s |
+| Business trick (3) | B / C | 67% | 2/3 | 83% | |
+| | D | 33% | 1/3 | 83% | 4.83s |
+
+All other groups are unchanged from C.
+
+What the rewrites did:
+- **Fixed (3):** T1 (2030 World Cup winner → "it hasn't been played"), T2 (Einstein's "second" Nobel), T10 (the "51st state").
+- **Still wrong (2):** T3, where the check wrongly believed Super Bowl LIX hadn't happened, and the rewrite repeated that. K2 was wrong before and after: it lacks the required shipment figure.
+- **Broke (1):** K5. The check marked "no source gives a 2035 closing price" as *contradicted*, because the sources contained price forecasts. The rewrite then presented $619–$20,000 forecasts instead of declining. The failure mode is **forecasts treated as facts**.
+- **Harmless (6):** T4–T7, T9 and A5 were already right and stayed right.
+
+Cost: rewritten answers take ~1.3s more and two extra GPT-OSS 20B calls (rewrite + re-check). Unflagged answers cost nothing extra.
+
+## Calibration: are the confidence labels honest?
+
+For each label shown on an answer: how many the judge scored fully right (correctness 2). Both sets combined; per-set tables are on the Track Record page and in `results*/calibration.json`.
+
+| Label | Arm C | Arm D |
+|---|---|---|
+| HIGH | right 39 of 43 (91%) | right 43 of 49 (88%) |
+| MEDIUM | none assigned | none assigned |
+| LOW | right 8 of 13 (62%) | right 5 of 5 (100%) |
+| No checkable claims | right 1 of 4 | right 2 of 6 |
+
+- **HIGH is meaningful.** About 9 in 10 HIGH answers were right. Its 6 misses in D split evenly. Three are incomplete answers missing a required detail (R3, M9, K2), which a claim check can't see. Three are wrong facts that looked backed: S9 (a wrong side detail), K5 (forecasts presented as an answer) and E4 (Tesla's 2023 production figure given as deliveries).
+- **LOW is not "probably wrong".** In C it drops to 62% right, so it carries some signal. In D, every LOW answer was right: these were corrected trick answers whose true claims ("no human has walked on Mars") simply aren't stated in the search results. LOW means "not confirmed by the sources", and the UI says so.
+- **MEDIUM never fires.** Answers have few claims (usually 1–4), so the 50–80% band is rarely hit. Either the thresholds should change or the label set should be two-level. That's a change for the next locked arm, not a retroactive tweak.
 
 ## Judge agreement
 
