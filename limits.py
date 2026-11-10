@@ -52,9 +52,9 @@ DEMO_VIDEO_URL = (os.environ.get("DEMO_VIDEO_URL") or "").strip()
 # The three example chips on the welcome screen — always served from cache
 # (pinned, never expire).
 EXAMPLE_QUERIES = (
-    "What is the capital of Australia?",
-    "How does compound interest work?",
-    "best tools",
+    "Who founded Nvidia, and in what year?",
+    "What was Apple's total net sales in fiscal year 2023?",
+    "When did Microsoft complete its acquisition of Activision Blizzard?",
 )
 
 # Time-sensitive queries are never served from (or written to) the cache, so
