@@ -47,6 +47,12 @@ HUMAN = os.path.join(RESULTS, "human_scores.csv")
 ANSWER_MODEL = "openai/gpt-oss-20b"
 JUDGE_MODEL = "openai/gpt-oss-120b"
 DAILY_TOKEN_CAP = int(os.environ.get("EVAL_DAILY_TOKEN_CAP", 90_000))  # per model per UTC day
+# EVAL_BACKEND=openrouter sends the same calls through OpenRouter's prepaid API,
+# pinned to Groq with fallbacks off (same models and weights as the direct Groq
+# runs), so the eval stops sharing the live site's free Groq quota. The free-tier
+# daily cap above doesn't apply there; the OpenRouter key's own credit limit does.
+BACKEND = os.environ.get("EVAL_BACKEND", "groq")
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
 PRICES = {"openai/gpt-oss-20b": (0.075, 0.30), "openai/gpt-oss-120b": (0.15, 0.60)}
 GROUPS = (["companies", "markets", "earnings", "acquisitions", "trick", "postcutoff"] if _BUSINESS
           else ["recent", "stable", "multistep", "trick"])
@@ -169,7 +175,36 @@ def used_today(model: str) -> int:
 
 
 def room(model: str, need: int) -> bool:
+    if BACKEND == "openrouter":
+        return True
     return used_today(model) + need <= DAILY_TOKEN_CAP
+
+
+def _openrouter_chat(model: str, system: str, user: str, max_tokens: int, effort: str) -> tuple[str, dict]:
+    """Same request as providers.chat_full, via OpenRouter pinned to Groq."""
+    import requests
+    body = {"model": model, "max_tokens": max_tokens, "temperature": 0,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "reasoning": {"effort": effort, "exclude": True},
+            "provider": {"order": ["Groq"], "allow_fallbacks": False},
+            "usage": {"include": True}}
+    key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    r = requests.post(f"{OPENROUTER_URL}/chat/completions", json=body, timeout=120,
+                      headers={"Authorization": f"Bearer {key}"})
+    if r.status_code == 429:
+        raise providers.ProviderLimit("openrouter")
+    if r.status_code == 402:
+        raise SystemExit("OpenRouter credits exhausted (HTTP 402). Stopping.")
+    if r.status_code >= 400:
+        raise SystemExit(f"OpenRouter error {r.status_code}: {r.text[:300]}")
+    d = r.json()
+    if d.get("provider") != "Groq":
+        raise SystemExit(f"OpenRouter served {model} from {d.get('provider')!r}, not Groq. Stopping.")
+    u = d.get("usage") or {}
+    text = (((d.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    usage = {k: int(u.get(k) or 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+    usage["openrouter_cost_usd"] = float(u.get("cost") or 0)
+    return text, usage
 
 
 def call(model: str, system: str, user: str, max_tokens: int, effort: str) -> tuple[str, dict, float]:
@@ -177,9 +212,12 @@ def call(model: str, system: str, user: str, max_tokens: int, effort: str) -> tu
     for attempt in range(6):
         t0 = time.perf_counter()
         try:
-            text, usage = providers.chat_full(model, [{"role": "user", "content": user}],
-                                              max_tokens=max_tokens, system=system,
-                                              effort=effort, temperature=0)
+            if BACKEND == "openrouter":
+                text, usage = _openrouter_chat(model, system, user, max_tokens, effort)
+            else:
+                text, usage = providers.chat_full(model, [{"role": "user", "content": user}],
+                                                  max_tokens=max_tokens, system=system,
+                                                  effort=effort, temperature=0)
             secs = time.perf_counter() - t0
             spend(model, usage.get("total_tokens", 0))
             return text, usage, secs
@@ -228,6 +266,7 @@ def cmd_answer() -> None:
                 "answer": text, "sources": sa.sources_from_results(s["results"]) if arm == "B" else [],
                 "usage": usage, "latency_s": round(latency, 3), "cost_usd": round(cost(ANSWER_MODEL, usage), 7),
                 "tavily_credits": 1 if arm == "B" else 0, "run_date": run_date,
+                "backend": "openrouter→groq" if BACKEND == "openrouter" else "groq",
             })
             print(f"{q['id']}/{arm}: {secs:.1f}s, {usage.get('total_tokens')} tok", flush=True)
     print("All 80 answers done.")
@@ -272,7 +311,8 @@ def cmd_judge() -> None:
             print(f"{a['id']}/{a['arm']}: unparseable verdict, will retry next run")
             continue
         append_jsonl(JUDGE, {"id": a["id"], "arm": a["arm"], **v, "judge_model": JUDGE_MODEL,
-                             "usage": usage})
+                             "usage": usage,
+                             "backend": "openrouter→groq" if BACKEND == "openrouter" else "groq"})
         print(f"{a['id']}/{a['arm']}: C{v['correctness']} G{v['groundedness']} D{int(v['declined'])}", flush=True)
     print("Judging done.")
 
@@ -397,7 +437,7 @@ def chart_svg(s: dict) -> str:
 def cmd_report() -> None:
     s = summarize()
     chart_dir = os.environ.get("EVAL_RESULTS_DIR") or HERE
-    with open(os.path.join(chart_dir, "chart.svg"), "w") as f:
+    with open(os.path.join(chart_dir, "chart_business.svg" if _BUSINESS else "chart.svg"), "w") as f:
         f.write(chart_svg(s))
     with open(os.path.join(RESULTS, "summary.json"), "w") as f:
         json.dump({f"{g}|{a}": v for (g, a), v in s.items()}, f, indent=1)
@@ -414,7 +454,9 @@ if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in cmds:
         print(__doc__)
         raise SystemExit(2)
-    if sys.argv[1] in ("answer", "judge") and not (os.environ.get("GROQ_API_KEY") and
+    if BACKEND == "openrouter" and not os.environ.get("OPENROUTER_API_KEY"):
+        raise SystemExit("EVAL_BACKEND=openrouter needs OPENROUTER_API_KEY in .env.")
+    if BACKEND != "openrouter" and sys.argv[1] in ("answer", "judge") and not (os.environ.get("GROQ_API_KEY") and
                                                     (os.environ.get("TAVILY_API_KEY") or sys.argv[1] == "judge")):
         if not providers.fake_mode():
             raise SystemExit("Set GROQ_API_KEY and TAVILY_API_KEY in .env first.")

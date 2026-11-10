@@ -1,0 +1,104 @@
+R1/A: C0 G0 D0
+R1/B: C2 G2 D0
+R2/A: C0 G0 D1
+R2/B: C2 G2 D0
+R3/A: C0 G2 D1
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+R3/B: C1 G2 D0
+R4/A: C0 G0 D1
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+R4/B: C2 G2 D0
+R5/A: C0 G2 D1
+R5/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+R6/A: C0 G2 D1
+R6/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+R7/A: C0 G2 D1
+R7/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+R8/A: C0 G2 D1
+R8/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+R9/A: C0 G0 D1
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+R9/B: C2 G2 D0
+R10/A: C0 G0 D1
+R10/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+S1/A: C2 G2 D0
+S1/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+S2/A: C2 G2 D0
+S2/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+S3/A: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+S3/B: C2 G2 D0
+S4/A: C2 G2 D0
+S4/B: C2 G2 D0
+S5/A: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+S5/B: C2 G2 D0
+S6/A: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+S6/B: C2 G2 D0
+S7/A: C2 G2 D0
+S7/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+S8/A: C2 G2 D0
+S8/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+S9/A: C1 G1 D0
+S9/B: C1 G1 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+S10/A: C2 G2 D0
+S10/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+M1/A: C0 G0 D0
+M1/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+M2/A: C0 G2 D1
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+M2/B: C0 G0 D1
+M3/A: C2 G2 D0
+M3/B: C0 G2 D1
+M4/A: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+M4/B: C2 G2 D0
+M5/A: C2 G2 D0
+M5/B: C2 G2 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+M6/A: C0 G2 D1
+M6/B: C2 G1 D0
+   rate-limited on openai/gpt-oss-120b; waiting 20s
+M7/A: C2 G2 D0
+M7/B: C2 G1 D0
+Daily token cap for openai/gpt-oss-120b reached (90000). Rerun tomorrow to resume.
+M8/A: C2 G2 D0
+M8/B: C2 G2 D0
+M9/A: C2 G2 D0
+M9/B: C0 G2 D1
+M10/A: C0 G2 D1
+M10/B: C2 G2 D0
+T1/A: C2 G2 D1
+T1/B: C0 G2 D0
+T2/A: C2 G2 D0
+T2/B: C0 G0 D0
+T3/A: C0 G0 D0
+T3/B: C0 G2 D1
+T4/A: C2 G1 D0
+T4/B: C2 G2 D0
+T5/A: C2 G2 D0
+T5/B: C2 G2 D0
+T6/A: C2 G2 D0
+T6/B: C2 G2 D0
+T7/A: C2 G2 D0
+T7/B: C2 G1 D0
+T8/A: C2 G2 D1
+T8/B: C2 G2 D1
+T9/A: C2 G2 D1
+T9/B: C2 G2 D1
+T10/A: C0 G0 D0
+T10/B: C0 G1 D0
+Judging done.
