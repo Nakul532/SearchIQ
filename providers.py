@@ -107,7 +107,16 @@ def _is_reasoning_model(model: str) -> bool:
 
 def chat(model: str, messages: list[dict], max_tokens: int = 800,
          system: str | None = None, effort: str = "low") -> str:
-    """One chat completion on Groq; returns the assistant text.
+    """One chat completion on Groq; returns the assistant text (see chat_full)."""
+    return chat_full(model, messages, max_tokens=max_tokens, system=system, effort=effort)[0]
+
+
+def chat_full(model: str, messages: list[dict], max_tokens: int = 800,
+              system: str | None = None, effort: str = "low",
+              temperature: float = 0.4) -> tuple[str, dict]:
+    """One chat completion on Groq → (text, usage). usage has prompt_tokens /
+    completion_tokens / total_tokens. The live app uses temperature 0.4; the
+    eval passes 0 for repeatability.
 
     gpt-oss models are reasoning models: ``reasoning_effort`` (low|medium|high)
     sets how long they think, and include_reasoning=False keeps the thinking out
@@ -124,9 +133,10 @@ def chat(model: str, messages: list[dict], max_tokens: int = 800,
         text = _fake_answer(model, last, system or "")
         if usage_hook:
             usage_hook(model, 500)
-        return text
+        return text, {"prompt_tokens": 400, "completion_tokens": 100, "total_tokens": 500}
 
-    body = {"model": model, "messages": msgs, "max_tokens": max_tokens, "temperature": 0.4}
+    body = {"model": model, "messages": msgs, "max_tokens": max_tokens,
+            "temperature": temperature}
     if _is_reasoning_model(model):
         body["reasoning_effort"] = effort
         body["include_reasoning"] = False
@@ -160,7 +170,8 @@ def chat(model: str, messages: list[dict], max_tokens: int = 800,
     if usage_hook:
         usage_hook(model, int(usage.get("total_tokens") or 0))
     choice = (data.get("choices") or [{}])[0]
-    return ((choice.get("message") or {}).get("content") or "").strip()
+    text = ((choice.get("message") or {}).get("content") or "").strip()
+    return text, {k: int(usage.get(k) or 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
 
 
 # --------------------------------------------------------------------------- #
