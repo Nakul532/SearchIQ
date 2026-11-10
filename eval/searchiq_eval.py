@@ -31,8 +31,13 @@ sys.path.insert(0, os.path.dirname(HERE))
 import providers  # noqa: E402
 import search_agent as sa  # noqa: E402
 
-RESULTS = os.environ.get("EVAL_RESULTS_DIR") or os.path.join(HERE, "results")  # override for dry runs
-QUESTIONS = os.path.join(HERE, "questions.jsonl")
+# EVAL_SET=business runs the 20-question business-research set (business_questions.jsonl)
+# into results_business/; the default is the locked 40-question set.
+EVAL_SET = os.environ.get("EVAL_SET", "core")
+_BUSINESS = EVAL_SET == "business"
+RESULTS = os.environ.get("EVAL_RESULTS_DIR") or os.path.join(
+    HERE, "results_business" if _BUSINESS else "results")  # override for dry runs
+QUESTIONS = os.path.join(HERE, "business_questions.jsonl" if _BUSINESS else "questions.jsonl")
 ANSWERS = os.path.join(RESULTS, "answers.jsonl")
 SEARCHES = os.path.join(RESULTS, "searches.jsonl")
 JUDGE = os.path.join(RESULTS, "judge.jsonl")
@@ -43,8 +48,11 @@ ANSWER_MODEL = "openai/gpt-oss-20b"
 JUDGE_MODEL = "openai/gpt-oss-120b"
 DAILY_TOKEN_CAP = int(os.environ.get("EVAL_DAILY_TOKEN_CAP", 90_000))  # per model per UTC day
 PRICES = {"openai/gpt-oss-20b": (0.075, 0.30), "openai/gpt-oss-120b": (0.15, 0.60)}
-GROUPS = ["recent", "stable", "multistep", "trick"]
-GROUP_NAMES = {"recent": "Recent events", "stable": "Stable facts (control)",
+GROUPS = (["companies", "markets", "earnings", "acquisitions", "trick", "postcutoff"] if _BUSINESS
+          else ["recent", "stable", "multistep", "trick"])
+GROUP_NAMES = {"companies": "Companies", "markets": "Markets", "earnings": "Earnings",
+               "acquisitions": "Acquisitions", "postcutoff": "† Post-cutoff",
+               "recent": "Recent events", "stable": "Stable facts (control)",
                "multistep": "Multi-step", "trick": "Trick / unanswerable"}
 
 # --------------------------------------------------------------------------- #
@@ -80,10 +88,26 @@ declined: true if the answer does NOT give a direct answer — it refuses, says 
 The reference snippets are evidence for YOU; the answer may or may not have seen them."""
 
 
+def is_trick(q: dict) -> bool:
+    return q.get("expected") == "decline_or_correct"
+
+
+def in_group(q: dict, g: str) -> bool:
+    """Report-group membership. 'trick' and 'postcutoff' are derived from flags, so
+    in the business set they cut across the four topic groups."""
+    if g == "all":
+        return True
+    if g == "trick":
+        return is_trick(q)
+    if g == "postcutoff":
+        return bool(q.get("post_cutoff"))
+    return q["group"] == g
+
+
 def judge_user(q: dict, arm: str, answer: str, results: list[dict]) -> str:
     refs = "\n\n".join(f"[{i}] {r.get('title')} — {r.get('url')}\n{r.get('content')}"
                        for i, r in enumerate(results, 1)) or "(none)"
-    return (f"QUESTION GROUP: {q['group']}{' (TRICK question)' if q['group'] == 'trick' else ''}\n"
+    return (f"QUESTION GROUP: {q['group']}{' (TRICK question)' if is_trick(q) else ''}\n"
             f"QUESTION: {q['question']}\n"
             f"ANSWER KEY: {q['answer_key']}\nGRADING NOTES: {q['grading_notes']}\n"
             f"ANSWER HAD SOURCES: {'yes (numbered [1]-[3], same as the reference snippets)' if arm == 'B' else 'no'}\n\n"
@@ -295,15 +319,16 @@ def cmd_agree() -> None:
 def summarize() -> dict:
     answers = {(r["id"], r["arm"]): r for r in load_jsonl(ANSWERS)}
     judge = {(r["id"], r["arm"]): r for r in load_jsonl(JUDGE)}
+    qs = {q["id"]: q for q in questions()}
     out = {}
     for g in GROUPS + ["all"]:
         for arm in ("A", "B"):
-            keys = [k for k, a in answers.items() if k[1] == arm and (g == "all" or a["group"] == g)]
+            keys = [k for k in answers if k[1] == arm and in_group(qs[k[0]], g)]
             js = [judge[k] for k in keys if k in judge]
             ans = [answers[k] for k in keys]
             n = len(js)
-            trick = [judge[k] for k in keys if k in judge and answers[k]["group"] == "trick"]
-            non = [judge[k] for k in keys if k in judge and answers[k]["group"] != "trick"]
+            trick = [judge[k] for k in keys if k in judge and is_trick(qs[k[0]])]
+            non = [judge[k] for k in keys if k in judge and not is_trick(qs[k[0]])]
             out[(g, arm)] = {
                 "n": n,
                 "correct_pct": 100 * sum(j["correctness"] for j in js) / (2 * n) if n else None,
@@ -324,7 +349,8 @@ def chart_svg(s: dict) -> str:
     plot_w, plot_h = W - L - 20, H - B_ - T
     groups = GROUPS + ["all"]
     names = {"recent": "Recent", "stable": "Stable (control)", "multistep": "Multi-step",
-             "trick": "Trick", "all": "Overall"}
+             "trick": "Trick", "all": "Overall", "companies": "Companies", "markets": "Markets",
+             "earnings": "Earnings", "acquisitions": "Acquisitions", "postcutoff": "† Post-cutoff"}
     col = {"A": "#94a3b8", "B": "#4f46e5"}
     slot = plot_w / len(groups)
     bw = slot * 0.32
