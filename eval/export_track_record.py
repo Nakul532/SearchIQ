@@ -36,7 +36,9 @@ NAMES = {"companies": "Companies", "markets": "Markets", "earnings": "Earnings",
          "trick": "Trick questions", "postcutoff": "† After the model's cutoff", "recent": "Recent events",
          "stable": "Stable facts (control)", "multistep": "Multi-step", "all": "Overall"}
 ARMS = {"A": "Model alone (no search)", "B": "SearchIQ: search + cited answer", "C": "SearchIQ v2: B + claim check",
-        "D": "SearchIQ v2: the check rewrites flagged answers (live today)"}
+        "D": "SearchIQ v2: the check rewrites flagged answers"}
+# Flip to True only after the live false-premise smoke test passes (twice).
+LIVE_REWRITE_VERIFIED = False
 
 
 def jl(path):
@@ -105,7 +107,9 @@ def main() -> None:
     data = {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "run_dates": "2026-11-10 (UTC)",
-        "arms": ARMS,
+        "arms": {**ARMS, "D": ARMS["D"] + (" (live today)" if LIVE_REWRITE_VERIFIED
+                                            else " (on the live site, being verified)")},
+        "live": {"arm": "D", "rewrite_verified": LIVE_REWRITE_VERIFIED},
         "models": {"answers": "GPT-OSS 20B (temperature 0)", "judge": "GPT-OSS 120B", "host": "Groq"},
         "locked": [{"what": "General set + rubric", "commit": "b4f6182"},
                    {"what": "Business set", "commit": "dac4e28"},

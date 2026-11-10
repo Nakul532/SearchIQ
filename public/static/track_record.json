@@ -1,11 +1,15 @@
 {
- "generated_at": "2026-11-10T07:23:33+00:00",
+ "generated_at": "2026-11-10T07:30:44+00:00",
  "run_dates": "2026-11-10 (UTC)",
  "arms": {
   "A": "Model alone (no search)",
   "B": "SearchIQ: search + cited answer",
   "C": "SearchIQ v2: B + claim check",
-  "D": "SearchIQ v2: the check rewrites flagged answers (live today)"
+  "D": "SearchIQ v2: the check rewrites flagged answers (on the live site, being verified)"
+ },
+ "live": {
+  "arm": "D",
+  "rewrite_verified": false
  },
  "models": {
   "answers": "GPT-OSS 20B (temperature 0)",

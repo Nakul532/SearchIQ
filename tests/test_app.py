@@ -30,7 +30,6 @@ os.environ.update({
     "GUEST_IP_DAILY_CAP": "10",
     "USER_DAILY_CAP": "10",
     "SITE_DAILY_CAP": "25",
-    "DEMO_VIDEO_URL": "https://example.com/demo",
     "GOOGLE_CLIENT_ID": "", "GOOGLE_CLIENT_SECRET": "",
 })
 os.environ.pop("VERCEL", None)
@@ -228,7 +227,7 @@ def test_guest_cap_is_three_and_shows_limit_card():
     ev = ask(c, "Explain how plate tectonics shape mountains", conv="c4")
     assert types(ev) == ["limit"]
     card = ev[0]
-    assert card["reason"] == "guest" and card["demo_url"] == "https://example.com/demo"
+    assert card["reason"] == "guest" and "demo_url" not in card and "demo" not in card["message"].lower()
     assert "3 free searches" in card["title"] and card["resets_at"]
 
 
@@ -282,7 +281,7 @@ def test_simulated_groq_429_shows_limit_card_not_error():
     ev = ask(c, "Explain how solar panels convert sunlight to power")
     assert "limit" in types(ev) and "error" not in types(ev)
     card = next(e for e in ev if e["type"] == "limit")
-    assert card["demo_url"] == "https://example.com/demo" and card["title"]
+    assert "demo_url" not in card and card["title"]
     # A 429 must not count against the guest's own quota.
     assert c.get("/api/me").get_json()["quota"]["remaining"] == 3
     # The non-streaming endpoints degrade the same way.
@@ -434,3 +433,39 @@ def test_revision_rules():
                         ["B"], 3, revised=("B",))
     assert c["sides"]["B"]["confidence"]["level"] == "high"
     assert agent.render_note(c, "B", ["Corrected the premise"]).startswith("✎ **Rewritten")
+
+
+def test_rewrite_falls_back_to_free_groq_when_openrouter_fails():
+    os.environ["SEARCHIQ_FAKE_OPENROUTER_DOWN"] = "1"
+    try:
+        ev = ask(client("9.9.9.9"), "In what year did Albert Einstein win his second Nobel Prize?")
+    finally:
+        os.environ.pop("SEARCHIQ_FAKE_OPENROUTER_DOWN")
+    assert {e["side"] for e in ev if e["type"] == "revise"} == {"A", "B"}   # free key did the rewrite
+    assert ("revise", "done") in [(e["step"], e["status"]) for e in ev if e["type"] == "step"]
+
+
+def test_rewrite_waits_for_free_tier_capacity(monkeypatch):
+    import providers
+    calls = {"n": 0}
+
+    class R:
+        def __init__(self, code):
+            self.status_code = code
+            self.headers = {"x-ratelimit-reset-tokens": "0.05s"} if code == 429 else {}
+            self.text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}], "usage": {"total_tokens": 5}}
+
+    class S:
+        def post(self, *a, **k):
+            calls["n"] += 1
+            return R(429 if calls["n"] == 1 else 200)
+
+    monkeypatch.setattr(providers, "_session", lambda: S())
+    monkeypatch.setattr(providers, "fake_mode", lambda: False)
+    waits = []
+    assert providers.chat("m", [{"role": "user", "content": "x"}], max_wait=30, on_wait=waits.append) == "ok"
+    assert waits == [True, False] and calls["n"] == 2
+    assert providers._parse_reset("1m2.5s") == 62.5 and providers._parse_reset("850ms") == 0.85

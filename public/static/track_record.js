@@ -26,7 +26,7 @@ function summaryCards(data) {
     const o = s.overall.arms;
     const best = o.D ? "D" : o.C ? "C" : "B";  // the arm that is live
     out.push(card(`${s.label}: SearchIQ correct`, pct(o[best].correct_pct),
-      `vs ${pct(o.A.correct_pct)} for the model alone · ${s.n_questions} questions · as live today (arm ${best})`));
+      `vs ${pct(o.A.correct_pct)} for the model alone · ${s.n_questions} questions · ${best === "D" && !(data.live && data.live.rewrite_verified) ? "arm D, whose live rewrite is being verified" : `as live today (arm ${best})`}`));
   }
   const business = data.sets.find((s) => s.key === "business");
   const pc = business && business.groups.find((g) => g.key === "postcutoff");

@@ -47,7 +47,6 @@ TOKEN_BUDGETS = {
 }
 
 CACHE_TTL_DAYS = _cap("CACHE_TTL_DAYS", 7)
-DEMO_VIDEO_URL = (os.environ.get("DEMO_VIDEO_URL") or "").strip()
 
 # The three example chips on the welcome screen — always served from cache
 # (pinned, never expire).
@@ -222,15 +221,12 @@ def install_token_budget(conn_factory) -> None:
 # --------------------------------------------------------------------------- #
 _LIMIT_COPY = {
     "guest": ("You've used today's {cap} free searches.",
-              "Free searches reset at midnight UTC. Meanwhile, watch the demo or try "
-              "a cached example below."),
+              "Free searches reset at midnight UTC. Meanwhile, try a cached example below."),
     "user": ("You've used today's {cap} searches.",
-             "Your searches reset at midnight UTC. Meanwhile, watch the demo or try a "
-             "cached example below."),
+             "Your searches reset at midnight UTC. Meanwhile, try a cached example below."),
     "site": ("SearchIQ has reached today's free search limit.",
              "This demo runs entirely on free tiers, so live searches are capped "
-             "site-wide. They reset at midnight UTC — meanwhile, watch the demo or try "
-             "a cached example below."),
+             "site-wide. They reset at midnight UTC. Meanwhile, try a cached example below."),
 }
 
 
@@ -244,7 +240,6 @@ def limit_info(reason: str, examples: list[dict] | None = None) -> dict:
         "title": title.format(cap=cap),
         "message": body,
         "resets_at": resets_at(),
-        "demo_url": DEMO_VIDEO_URL or None,
         "examples": examples if examples is not None else [],
     }
 
