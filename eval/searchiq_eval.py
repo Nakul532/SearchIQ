@@ -153,8 +153,23 @@ def spend(model: str, tokens: int) -> None:
         json.dump(b, f, indent=1, sort_keys=True)
 
 
+def used_today(model: str) -> int:
+    """Tokens spent today on ``model`` across BOTH eval sets (each run writes only
+    its own budget.json, so concurrent runs never clobber each other; the daily
+    cap counts them together)."""
+    key = f"{_today()}|{model}"
+    total = 0
+    for d in {RESULTS, os.path.join(HERE, "results"), os.path.join(HERE, "results_business")}:
+        try:
+            with open(os.path.join(d, "budget.json")) as f:
+                total += json.load(f).get(key, 0)
+        except (OSError, ValueError):
+            pass
+    return total
+
+
 def room(model: str, need: int) -> bool:
-    return _budget().get(f"{_today()}|{model}", 0) + need <= DAILY_TOKEN_CAP
+    return used_today(model) + need <= DAILY_TOKEN_CAP
 
 
 def call(model: str, system: str, user: str, max_tokens: int, effort: str) -> tuple[str, dict, float]:
