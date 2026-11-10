@@ -490,9 +490,7 @@ def api_query():
                         yield emit({"type": "check", **check})
                     yield emit({"type": "step", "step": "revise", "status": "done" if revisions else "skipped",
                                 "detail": (f"Rewrote {' and '.join(sorted(revisions))}" if revisions
-                                           else "Rewrite unavailable: showing the warning only")
-                                          + (f" · free key (prepaid key unavailable: {status.get('why', '')})"
-                                             if status["fallback"] else " · prepaid key")})
+                                           else "Rewrite unavailable: showing the warning only")})
 
             if not results_by_side:
                 if limited:
@@ -609,7 +607,6 @@ def _rewrite_llm(status: dict):
             except providers.ProviderError as exc:
                 app.logger.warning("Rewrite via OpenRouter failed (%s); using the free Groq key", exc)
                 status["fallback"] = True
-                status["why"] = str(exc)[:80]
         return providers.chat(providers.REWRITE_MODEL, msgs, max_tokens=max_tokens, system=system,
                               effort=effort, max_wait=REWRITE_MAX_WAIT_S,
                               on_wait=lambda w: status.update(waiting=w))
