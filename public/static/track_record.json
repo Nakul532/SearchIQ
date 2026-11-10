@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-11-10T07:30:44+00:00",
+ "generated_at": "2026-11-10T07:53:39+00:00",
  "run_dates": "2026-11-10 (UTC)",
  "arms": {
   "A": "Model alone (no search)",
@@ -39,7 +39,25 @@
   "raw": "https://github.com/Nakul532/SearchIQ/tree/main/eval",
   "rubric": "https://github.com/Nakul532/SearchIQ/blob/main/eval/rubric.md"
  },
- "agreement": null,
+ "agreement": {
+  "per_criterion": {
+   "correctness": {
+    "agree": 10,
+    "n": 10,
+    "rate": 1.0
+   }
+  },
+  "not_scored": [
+   "groundedness",
+   "declined"
+  ],
+  "overall": 1.0,
+  "agree": 10,
+  "labels": 10,
+  "n_answers": 10,
+  "human_right": 9,
+  "disagreements": []
+ },
  "sets": [
   {
    "key": "business",

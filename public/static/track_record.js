@@ -100,9 +100,14 @@ function setSection(s, armNames) {
 
 function method(data) {
   const ag = data.agreement;
-  const agree = ag && ag.overall != null
-    ? `A person re-scored 10 random answers; they matched the judge on ${pct(100 * ag.overall)} of labels.`
-    : `A person is re-scoring 10 random answers to check the judge. <b>Until that's done, the judge's scores are unverified.</b>`;
+  let agree = `A person is re-scoring 10 random answers to check the judge. <b>Until that's done, the judge's scores are unverified.</b>`;
+  if (ag && ag.per_criterion) {
+    const c = ag.per_criterion.correctness;
+    const names = { groundedness: "groundedness", declined: "declines" };
+    agree = (c ? `A person re-scored ${ag.n_answers} randomly drawn answers (seed 42) for correctness, without seeing the judge's scores: <b>they agreed with the judge on ${c.agree} of ${c.n}</b>.` : "")
+      + (ag.human_right != null ? ` Caveat: ${ag.human_right} of those ${ag.n_answers} answers were right, so this shows the judge isn't harsh on good answers; it says little about how it grades wrong or partly right ones.` : "")
+      + (ag.not_scored && ag.not_scored.length ? ` ${ag.not_scored.map((k) => names[k] || k).join(" and ").replace(/^./, (x) => x.toUpperCase())} ${ag.not_scored.length > 1 ? "were" : "was"} not human-checked.` : "");
+  }
   const locked = data.locked.map((l) => `${esc(l.what)} <code>${esc(l.commit)}</code>`).join(", ");
   return `<h2>How this is measured</h2>
     <ul class="tr-method">
