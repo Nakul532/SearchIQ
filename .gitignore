@@ -1,7 +1,8 @@
-# Local SQLite data (use a Railway volume in production)
+# Local SQLite data + the pre-migration archive (may contain user data)
 *.db
-
-# DB exports from export_db.py (may contain user data)
+archive/
+backup*.sql
+backup*.json
 db_export.json
 
 # Python
@@ -10,10 +11,13 @@ __pycache__/
 .venv/
 venv/
 
-# Secrets / local env
+# Secrets / local env — keys live ONLY in Vercel environment variables
 .env
 .env.*
 !.env.example
+
+# Vercel CLI
+.vercel/
 
 # Node (only used for throwaway test tooling)
 node_modules/

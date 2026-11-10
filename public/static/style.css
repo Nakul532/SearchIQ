@@ -182,15 +182,15 @@ body {
 .route-badge.medium  { color: #93b5fc; border-color: rgba(96,165,250,.34); background: rgba(96,165,250,.11); }   /* blue */
 .route-badge.complex { color: #d6c8ff; border-color: rgba(167,139,250,.34); background: rgba(167,139,250,.12); } /* purple */
 
-/* routing-economics card — model mix + cost saved vs always-Sonnet */
+/* routing-economics card — fast-model share + estimated cost per query */
 .routing-card { background: var(--grad-soft); border-color: rgba(99,102,241,.2); }
 .models-split { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; margin: 12px 0 4px; }
 .model-stat { text-align: center; padding: 12px 8px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: rgba(255,255,255,.03); }
-.model-stat.haiku  { border-color: rgba(96,165,250,.28); }
-.model-stat.sonnet { border-color: rgba(167,139,250,.28); }
+.model-stat.fast { border-color: rgba(96,165,250,.28); }
+.model-stat.deep { border-color: rgba(167,139,250,.28); }
 .model-count { font-size: 26px; font-weight: 800; font-family: "JetBrains Mono", monospace; letter-spacing: -0.02em; }
-.model-stat.haiku  .model-count { color: #93b5fc; }
-.model-stat.sonnet .model-count { color: #c4b5fd; }
+.model-stat.fast .model-count { color: #93b5fc; }
+.model-stat.deep .model-count { color: #c4b5fd; }
 .model-name { font-size: 11.5px; color: var(--muted); margin-top: 4px; font-weight: 600; }
 .cost-saved-row { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .cs-icon { font-size: 16px; }
@@ -640,3 +640,43 @@ body {
   font-size: 11.5px; font-weight: 700; color: #d9c9ff; padding: 5px 11px; border-radius: 999px;
   background: rgba(167,139,250,.16); border: 1px solid rgba(167,139,250,.36); margin-bottom: 8px;
 }
+
+
+/* ---------- Free-tier guard rails: quota pill, cached badge, limit card ---------- */
+.quota-pill {
+  font-size: 12.5px; font-weight: 600; color: #c7d0ff; padding: 6px 13px; border-radius: 999px;
+  background: rgba(124,139,255,.1); border: 1px solid rgba(124,139,255,.28); white-space: nowrap;
+}
+.quota-pill.empty { color: #ffd9a0; background: rgba(251,191,36,.1); border-color: rgba(251,191,36,.3); }
+a.ghost-btn { text-decoration: none; }
+.cached-badge {
+  display: inline-flex; align-items: center; gap: 6px; margin: 0 2px 10px;
+  font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 999px;
+  color: #c7d0ff; background: rgba(124,139,255,.12); border: 1px solid rgba(124,139,255,.32);
+  animation: rise .4s ease;
+}
+.limit-card {
+  background: var(--surface); border: 1px solid rgba(251,191,36,.35); border-radius: 18px;
+  padding: 18px 20px; max-width: 560px; box-shadow: var(--shadow-sm);
+}
+.limit-title { font-weight: 800; font-size: 15px; margin-bottom: 6px; color: #ffe6a7; }
+.limit-body { font-size: 13.5px; color: var(--muted); line-height: 1.55; }
+.limit-reset { font-size: 12px; color: var(--faint); margin-top: 8px; }
+.limit-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.limit-actions:empty { display: none; }
+.limit-demo, .limit-signin {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700;
+  padding: 9px 14px; border-radius: 11px; text-decoration: none;
+}
+.limit-demo { color: #1f2430; background: #ffe6a7; }
+.limit-signin { color: var(--text); border: 1px solid var(--border-strong); }
+.limit-ex-head { font-size: 12px; color: var(--faint); margin: 14px 0 8px; }
+.limit-examples { display: flex; flex-wrap: wrap; gap: 8px; }
+.login-guest { display: inline-block; margin-top: 16px; font-size: 13px; color: var(--muted); text-decoration: none; }
+.login-guest:hover { color: var(--text); }
+@media (max-width: 640px) {
+  .quota-pill { display: none; }
+  .limit-card { max-width: 100%; }
+}
+
+[hidden] { display: none !important; }

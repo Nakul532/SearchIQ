@@ -38,12 +38,12 @@
         Sign in with Google
       </a>
       <div class="login-hint">We only read your name, email, and profile picture.</div>
+      <a class="login-guest" href="/">Continue as a guest →</a>
       {% else %}
       <div class="login-notice">
-        ⚠ Google sign-in isn't configured yet. Set <code>GOOGLE_CLIENT_ID</code> and
-        <code>GOOGLE_CLIENT_SECRET</code> (and <code>FLASK_SECRET_KEY</code>) in the
-        environment, then restart the app.
+        Google sign-in isn't enabled on this deployment — you can still search as a guest.
       </div>
+      <a class="login-guest" href="/">Continue as a guest →</a>
       {% endif %}
     </div>
   </div>
