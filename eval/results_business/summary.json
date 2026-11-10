@@ -50,6 +50,23 @@
   "cost_mean": 0.00023427999999999999,
   "tavily": 5
  },
+ "companies|D": {
+  "n": 5,
+  "correct_pct": 100.0,
+  "fully_correct": 5,
+  "grounded_pct": 100.0,
+  "trick_pass": [
+   0,
+   0
+  ],
+  "unneeded_refusals": [
+   0,
+   5
+  ],
+  "latency_med": 2.839,
+  "cost_mean": 0.00023427999999999999,
+  "tavily": 5
+ },
  "markets|A": {
   "n": 5,
   "correct_pct": 40.0,
@@ -101,6 +118,23 @@
   "cost_mean": 0.00029586,
   "tavily": 5
  },
+ "markets|D": {
+  "n": 5,
+  "correct_pct": 60.0,
+  "fully_correct": 3,
+  "grounded_pct": 100.0,
+  "trick_pass": [
+   0,
+   1
+  ],
+  "unneeded_refusals": [
+   1,
+   4
+  ],
+  "latency_med": 3.63,
+  "cost_mean": 0.00041820000000000003,
+  "tavily": 5
+ },
  "earnings|A": {
   "n": 5,
   "correct_pct": 40.0,
@@ -136,6 +170,23 @@
   "tavily": 5
  },
  "earnings|C": {
+  "n": 5,
+  "correct_pct": 60.0,
+  "fully_correct": 3,
+  "grounded_pct": 70.0,
+  "trick_pass": [
+   0,
+   1
+  ],
+  "unneeded_refusals": [
+   0,
+   4
+  ],
+  "latency_med": 8.594,
+  "cost_mean": 0.00025898,
+  "tavily": 5
+ },
+ "earnings|D": {
   "n": 5,
   "correct_pct": 60.0,
   "fully_correct": 3,
@@ -203,6 +254,23 @@
   "cost_mean": 0.0002668,
   "tavily": 5
  },
+ "acquisitions|D": {
+  "n": 5,
+  "correct_pct": 100.0,
+  "fully_correct": 5,
+  "grounded_pct": 100.0,
+  "trick_pass": [
+   0,
+   1
+  ],
+  "unneeded_refusals": [
+   0,
+   4
+  ],
+  "latency_med": 3.42,
+  "cost_mean": 0.0003249,
+  "tavily": 5
+ },
  "trick|A": {
   "n": 3,
   "correct_pct": 66.66666666666667,
@@ -254,6 +322,23 @@
   "cost_mean": 0.0003043333333333333,
   "tavily": 3
  },
+ "trick|D": {
+  "n": 3,
+  "correct_pct": 33.333333333333336,
+  "fully_correct": 1,
+  "grounded_pct": 83.33333333333333,
+  "trick_pass": [
+   0,
+   3
+  ],
+  "unneeded_refusals": [
+   0,
+   0
+  ],
+  "latency_med": 4.833,
+  "cost_mean": 0.0005186,
+  "tavily": 3
+ },
  "postcutoff|A": {
   "n": 5,
   "correct_pct": 0.0,
@@ -289,6 +374,23 @@
   "tavily": 5
  },
  "postcutoff|C": {
+  "n": 5,
+  "correct_pct": 100.0,
+  "fully_correct": 5,
+  "grounded_pct": 100.0,
+  "trick_pass": [
+   0,
+   0
+  ],
+  "unneeded_refusals": [
+   0,
+   5
+  ],
+  "latency_med": 3.42,
+  "cost_mean": 0.00025116,
+  "tavily": 5
+ },
+ "postcutoff|D": {
   "n": 5,
   "correct_pct": 100.0,
   "fully_correct": 5,
@@ -354,6 +456,23 @@
   ],
   "latency_med": 3.2775,
   "cost_mean": 0.00026398,
+  "tavily": 20
+ },
+ "all|D": {
+  "n": 20,
+  "correct_pct": 80.0,
+  "fully_correct": 16,
+  "grounded_pct": 92.5,
+  "trick_pass": [
+   0,
+   3
+  ],
+  "unneeded_refusals": [
+   1,
+   17
+  ],
+  "latency_med": 3.3785,
+  "cost_mean": 0.00030909,
   "tavily": 20
  }
 }

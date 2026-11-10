@@ -460,6 +460,24 @@ def api_query():
                     yield emit({"type": "check", **check})
                 yield emit({"type": "step", "step": "check", "status": "done" if check else "skipped",
                             "detail": _check_summary(check) if check else "Check unavailable this time"})
+                # The check acts: rewrite drafts with a false premise or a
+                # contradicted claim, then re-check the rewrites.
+                if check and any(agent.needs_revision(check, s) for s in results_by_side):
+                    yield emit({"type": "step", "step": "revise", "status": "active",
+                                "detail": "Rewriting to fix what the check found"})
+                    answers_now = {s: r["answer"] for s, r in results_by_side.items()}
+                    check, revisions = agent.revise_flagged(query, results, answers_now, check,
+                                                            n_sources=sa.MAX_SOURCES)
+                    for side, rv in revisions.items():
+                        results_by_side[side] = {**results_by_side[side], "answer": rv["answer"],
+                                                 "original": rv["original"], "revision_reasons": rv["reasons"]}
+                        yield emit({"type": "revise", "side": side, "answer": rv["answer"],
+                                    "original": rv["original"], "reasons": rv["reasons"]})
+                    if revisions:
+                        yield emit({"type": "check", **check})
+                    yield emit({"type": "step", "step": "revise", "status": "done" if revisions else "skipped",
+                                "detail": (f"Rewrote {' and '.join(sorted(revisions))}" if revisions
+                                           else "Rewrite unavailable: showing the warning only")})
 
             if not results_by_side:
                 if limited:
@@ -540,6 +558,10 @@ def _serve_cached(conn, cached: dict, query: str, sid: str, conversation_id: str
     for side in ("A", "B"):
         yield emit({"type": "answer", "side": side, "answer": cached[side]["answer"],
                     "sources": cached[side]["sources"]})
+        if cached[side].get("original"):
+            yield emit({"type": "revise", "side": side, "answer": cached[side]["answer"],
+                        "original": cached[side]["original"],
+                        "reasons": cached[side].get("revision_reasons", [])})
     if cached.get("check"):
         yield emit({"type": "check", **cached["check"]})
         yield emit({"type": "step", "step": "check", "status": "done",

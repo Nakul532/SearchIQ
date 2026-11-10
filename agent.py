@@ -78,7 +78,10 @@ def _s(x, n: int = 240) -> str:
 
 
 def confidence(claims: list[dict], premise_ok: bool) -> dict:
-    """Deterministic label from claim labels: high / medium / low / none."""
+    """Deterministic label from claim labels: high / medium / low / none.
+
+    ``premise_ok`` is False when the question's premise is flagged and the answer
+    hasn't been rewritten to correct it (a rewritten answer passes True)."""
     n = len(claims)
     backed = sum(c["status"] == "backed" for c in claims)
     contra = sum(c["status"] == "contradicted" for c in claims)
@@ -97,7 +100,7 @@ def confidence(claims: list[dict], premise_ok: bool) -> dict:
     return {"level": level, "backed": backed, "total": n, "contradicted": contra}
 
 
-def normalize(raw: dict, sides: list[str], n_sources: int) -> dict:
+def normalize(raw: dict, sides: list[str], n_sources: int, revised: tuple = ()) -> dict:
     prem = raw.get("premise") if isinstance(raw.get("premise"), dict) else {}
     premise_ok = prem.get("ok") is not False
     claims_by_side: dict[str, list[dict]] = {s: [] for s in sides}
@@ -128,7 +131,8 @@ def normalize(raw: dict, sides: list[str], n_sources: int) -> dict:
                 break
     return {
         "premise": {"ok": premise_ok, "note": "" if premise_ok else _s(prem.get("note"))},
-        "sides": {s: {"claims": claims_by_side[s], "confidence": confidence(claims_by_side[s], premise_ok)}
+        "sides": {s: {"claims": claims_by_side[s],
+                      "confidence": confidence(claims_by_side[s], premise_ok or s in revised)}
                   for s in sides},
         "disagreements": disagreements,
     }
@@ -142,7 +146,7 @@ def parse(text: str) -> dict:
 
 
 def check_answers(question: str, results: list[dict], answers: dict[str, str],
-                  llm=None, n_sources: int = 3) -> dict | None:
+                  llm=None, n_sources: int = 3, revised: tuple = ()) -> dict | None:
     """Run the check; returns the normalized check dict, or None on any failure.
 
     ``llm(system, user, max_tokens, effort) -> text`` defaults to the live app's
@@ -157,10 +161,103 @@ def check_answers(question: str, results: list[dict], answers: dict[str, str],
         raw = parse(llm(CHECK_SYSTEM, user, 1800, "low"))
     except (providers.ProviderLimit, providers.ProviderError, ValueError, json.JSONDecodeError):
         return None
-    return normalize(raw, sorted(answers), min(n_sources, len(results or [])))
+    return normalize(raw, sorted(answers), min(n_sources, len(results or [])), revised=revised)
 
 
-def render_note(check: dict, side: str) -> str:
+# --------------------------------------------------------------------------- #
+# Rewrite: make the warning act (arm D)
+# --------------------------------------------------------------------------- #
+REVISE_SYSTEM = """You are SearchIQ's editor for business research. You receive a question, numbered web search results, a draft answer, and a fact check of that draft. Rewrite the draft so an executive can rely on it:
+
+1. If the check says the question's premise is false, open by correcting the premise in one plain sentence, and do not answer as if it were true. If the results give the real facts, state them with citations.
+2. Remove every claim the check marked CONTRADICTED, or replace it with what the cited result actually says, citing [n].
+3. Keep claims marked BACKED, with their citations.
+4. Keep a claim marked UNSUPPORTED only if the answer needs it, and mark it "(not confirmed by the sources)".
+5. Add no facts that are not in the numbered results. Keep the draft's style and roughly its length.
+
+Reply with ONLY the rewritten answer."""
+
+
+def needs_revision(check: dict | None, side: str) -> bool:
+    """Rewrite when the premise is flagged or any claim is contradicted."""
+    if not check or side not in check.get("sides", {}):
+        return False
+    return (not check["premise"]["ok"]) or any(
+        c["status"] == "contradicted" for c in check["sides"][side]["claims"])
+
+
+def revision_reasons(check: dict, side: str) -> list[str]:
+    out = []
+    if not check["premise"]["ok"]:
+        out.append("Corrected the question's premise" + (f": {check['premise']['note']}" if check["premise"]["note"] else ""))
+    for c in check["sides"][side]["claims"]:
+        if c["status"] == "contradicted":
+            out.append(f"Removed or corrected a claim the sources contradict: {c['text']}")
+    return out
+
+
+def _check_for_editor(check: dict, side: str) -> str:
+    lines = [f"PREMISE: {'OK' if check['premise']['ok'] else 'FALSE: ' + check['premise']['note']}"]
+    for c in check["sides"][side]["claims"]:
+        refs = ",".join(str(i) for i in c["sources"])
+        lines.append(f"- {c['status'].upper()}{' [' + refs + ']' if refs else ''}: {c['text']}"
+                     + (f" ({c['note']})" if c["note"] else ""))
+    return "\n".join(lines)
+
+
+def revise_answer(question: str, results: list[dict], answer: str, check: dict, side: str,
+                  llm=None, n_sources: int = 3) -> str | None:
+    """Rewrite one draft per the check; None on failure (keep the original)."""
+    llm = llm or _default_llm
+    user = (f"Question: {question}\n\nSearch results:\n\n{_format_results(results, n_sources)}\n\n"
+            f"=== Draft ===\n{answer[:2500]}\n\n=== Fact check of the draft ===\n{_check_for_editor(check, side)}")
+    try:
+        text = (llm(REVISE_SYSTEM, user, 1600, "low") or "").strip()
+    except (providers.ProviderLimit, providers.ProviderError):
+        return None
+    return text or None
+
+
+def check_and_revise(question: str, results: list[dict], answers: dict[str, str],
+                     llm=None, n_sources: int = 3) -> tuple[dict | None, dict[str, dict]]:
+    """Check, rewrite flagged drafts, re-check the rewrites.
+
+    Returns (check, revisions). ``check`` describes the answers as finally shown
+    (rewritten sides re-checked, their confidence no longer capped by the premise
+    flag because the rewrite addresses it). ``revisions`` maps side →
+    {answer, original, reasons}."""
+    check = check_answers(question, results, answers, llm=llm, n_sources=n_sources)
+    if not check:
+        return None, {}
+    return revise_flagged(question, results, answers, check, llm=llm, n_sources=n_sources)
+
+
+def revise_flagged(question: str, results: list[dict], answers: dict[str, str], check: dict,
+                   llm=None, n_sources: int = 3) -> tuple[dict, dict[str, dict]]:
+    """The rewrite half of check_and_revise, given the first check."""
+    import copy
+    check = copy.deepcopy(check)
+    revisions = {}
+    for side in sorted(check["sides"]):
+        if needs_revision(check, side):
+            new = revise_answer(question, results, answers[side], check, side, llm=llm, n_sources=n_sources)
+            if new:
+                revisions[side] = {"answer": new, "original": answers[side],
+                                   "reasons": revision_reasons(check, side)}
+    if revisions:
+        recheck = check_answers(question, results, {s: r["answer"] for s, r in revisions.items()},
+                                llm=llm, n_sources=n_sources, revised=tuple(revisions))
+        if recheck:
+            for s in revisions:
+                check["sides"][s] = recheck["sides"][s]
+        else:  # re-check failed: show the rewrite with an honest "none" label
+            for s in revisions:
+                check["sides"][s] = {"claims": [], "confidence": confidence([], True)}
+        check["revised"] = sorted(revisions)
+    return check, revisions
+
+
+def render_note(check: dict, side: str, reasons: list[str] | None = None) -> str:
     """The check as the user sees it under one answer, in markdown (also what
     eval arm C appends to the answer before judging)."""
     s = check["sides"].get(side)
@@ -168,7 +265,9 @@ def render_note(check: dict, side: str) -> str:
         return ""
     conf = s["confidence"]
     lines = []
-    if not check["premise"]["ok"]:
+    if reasons:
+        lines.append("✎ **Rewritten by SearchIQ's check:** " + "; ".join(reasons))
+    elif not check["premise"]["ok"]:
         lines.append(f"⚠ **Check the question's premise:** {check['premise']['note']}")
     label = {"high": "High", "medium": "Medium", "low": "Low", "none": "No checkable claims"}[conf["level"]]
     head = f"**SearchIQ check — confidence: {label}**"

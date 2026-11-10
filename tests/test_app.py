@@ -408,3 +408,29 @@ def test_agent_check_normalizes_and_labels_deterministically():
 def test_track_record_page_is_public():
     r = client().get("/track-record")
     assert r.status_code == 200 and b"Track record" in r.data and b"track_record.js" in r.data
+
+
+def test_false_premise_rewrites_the_answer():
+    ev = ask(client("8.8.8.8"), "In what year did Albert Einstein win his second Nobel Prize?")
+    revs = [e for e in ev if e["type"] == "revise"]
+    assert {r["side"] for r in revs} == {"A", "B"}            # premise flagged → both rewritten
+    assert all("only one Nobel" in r["answer"] and r["original"] and r["reasons"] for r in revs)
+    assert ("revise", "done") in [(e["step"], e["status"]) for e in ev if e["type"] == "step"]
+    final = [e for e in ev if e["type"] == "check"][-1]
+    assert final["revised"] == ["A", "B"] and final["premise"]["ok"] is False
+    assert "comparison" in types(ev)
+
+
+def test_revision_rules():
+    import agent
+    base = {"premise": {"ok": True, "note": ""}, "disagreements": [],
+            "sides": {"B": {"claims": [{"text": "t", "status": "unsupported", "sources": [], "note": ""}]}}}
+    assert agent.needs_revision(base, "B") is False           # unsupported alone only warns
+    contra = {**base, "sides": {"B": {"claims": [{"text": "t", "status": "contradicted", "sources": [1], "note": ""}]}}}
+    assert agent.needs_revision(contra, "B") is True
+    # A rewritten answer isn't capped at LOW by the premise flag it now corrects.
+    c = agent.normalize({"premise": {"ok": False, "note": "x"},
+                         "claims": [{"side": "B", "text": "t", "status": "backed", "sources": [1]}]},
+                        ["B"], 3, revised=("B",))
+    assert c["sides"]["B"]["confidence"]["level"] == "high"
+    assert agent.render_note(c, "B", ["Corrected the premise"]).startswith("✎ **Rewritten")

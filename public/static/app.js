@@ -336,7 +336,7 @@ function fillAnswerSide(comp, side, answer, sources) {
 // --------------------------------------------------------------------------- //
 // v2 agent: steps panel, claim check, confidence labels, disagreement view
 // --------------------------------------------------------------------------- //
-const STEP_LABELS = { cache: "Cache", search: "Search", draft: "Draft", check: "Check claims" };
+const STEP_LABELS = { cache: "Cache", search: "Search", draft: "Draft", check: "Check claims", revise: "Rewrite" };
 const CONF_LABELS = { high: "High confidence", medium: "Medium confidence", low: "Low confidence", none: "No checkable claims" };
 
 function updateStep(comp, ev) {
@@ -380,6 +380,25 @@ function renderClaims(side, sources) {
       <summary><span class="conf conf-${c.level}">${CONF_LABELS[c.level] || c.level}</span><span class="conf-count">${counts}</span></summary>
       ${rows ? `<ul class="claims">${rows}</ul>` : `<div class="claim-note">This answer makes no factual claims to check.</div>`}
     </details>`;
+}
+
+// The check acted: swap in the rewritten draft, say why, keep the original one click away.
+function applyRevision(comp, ev) {
+  if (!comp) return;
+  const card = comp.el.querySelector(`.ab-answer[data-side="${ev.side}"]`);
+  if (!card) return;
+  card.querySelector(".bubble").innerHTML = renderMarkdown(ev.answer);
+  let box = card.querySelector(".revised-box");
+  if (!box) {
+    box = document.createElement("div");
+    box.className = "revised-box";
+    card.querySelector(".bubble").before(box);
+  }
+  const reasons = (ev.reasons || []).map((r) => `<li>${escapeHtml(r)}</li>`).join("");
+  box.innerHTML = `<div class="revised-head">✎ Rewritten by SearchIQ's check</div>` +
+    (reasons ? `<ul class="revised-reasons">${reasons}</ul>` : "") +
+    `<details class="revised-original"><summary>Show the original draft</summary><div class="revised-original-body">${renderMarkdown(ev.original || "")}</div></details>`;
+  scrollToBottom();
 }
 
 function applyCheck(comp, check) {
@@ -622,6 +641,9 @@ async function sendQuery(forcedQuery, force = false, followup = false) {
         break;
       case "check":
         applyCheck(comp, ev);
+        break;
+      case "revise":
+        applyRevision(comp, ev);
         break;
       case "comparison":
         enablePicks(comp, ev.comparison_id);

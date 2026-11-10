@@ -1,10 +1,11 @@
 {
- "generated_at": "2026-11-10T06:56:29+00:00",
+ "generated_at": "2026-11-10T07:23:33+00:00",
  "run_dates": "2026-11-10 (UTC)",
  "arms": {
   "A": "Model alone (no search)",
   "B": "SearchIQ: search + cited answer",
-  "C": "SearchIQ v2: B + claim check"
+  "C": "SearchIQ v2: B + claim check",
+  "D": "SearchIQ v2: the check rewrites flagged answers (live today)"
  },
  "models": {
   "answers": "GPT-OSS 20B (temperature 0)",
@@ -23,6 +24,10 @@
   {
    "what": "Arm C definition",
    "commit": "e8736d8"
+  },
+  {
+   "what": "Arm D + calibration",
+   "commit": "d86c89c"
   }
  ],
  "links": {
@@ -40,7 +45,8 @@
    "arms": [
     "A",
     "B",
-    "C"
+    "C",
+    "D"
    ],
    "groups": [
     {
@@ -80,6 +86,22 @@
        "cost_mean": 9.562e-05
       },
       "C": {
+       "n": 5,
+       "correct_pct": 100.0,
+       "fully_correct": 5,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        5
+       ],
+       "latency_med": 2.839,
+       "cost_mean": 0.00023427999999999999
+      },
+      "D": {
        "n": 5,
        "correct_pct": 100.0,
        "fully_correct": 5,
@@ -148,6 +170,22 @@
        ],
        "latency_med": 3.235,
        "cost_mean": 0.00029586
+      },
+      "D": {
+       "n": 5,
+       "correct_pct": 60.0,
+       "fully_correct": 3,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        1
+       ],
+       "unneeded_refusals": [
+        1,
+        4
+       ],
+       "latency_med": 3.63,
+       "cost_mean": 0.00041820000000000003
       }
      }
     },
@@ -188,6 +226,22 @@
        "cost_mean": 0.0001128
       },
       "C": {
+       "n": 5,
+       "correct_pct": 60.0,
+       "fully_correct": 3,
+       "grounded_pct": 70.0,
+       "trick_pass": [
+        0,
+        1
+       ],
+       "unneeded_refusals": [
+        0,
+        4
+       ],
+       "latency_med": 8.594,
+       "cost_mean": 0.00025898
+      },
+      "D": {
        "n": 5,
        "correct_pct": 60.0,
        "fully_correct": 3,
@@ -256,6 +310,22 @@
        ],
        "latency_med": 3.42,
        "cost_mean": 0.0002668
+      },
+      "D": {
+       "n": 5,
+       "correct_pct": 100.0,
+       "fully_correct": 5,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        1
+       ],
+       "unneeded_refusals": [
+        0,
+        4
+       ],
+       "latency_med": 3.42,
+       "cost_mean": 0.0003249
       }
      }
     },
@@ -310,6 +380,22 @@
        ],
        "latency_med": 3.503,
        "cost_mean": 0.0003043333333333333
+      },
+      "D": {
+       "n": 3,
+       "correct_pct": 33.333333333333336,
+       "fully_correct": 1,
+       "grounded_pct": 83.33333333333333,
+       "trick_pass": [
+        0,
+        3
+       ],
+       "unneeded_refusals": [
+        0,
+        0
+       ],
+       "latency_med": 4.833,
+       "cost_mean": 0.0005186
       }
      }
     },
@@ -350,6 +436,22 @@
        "cost_mean": 0.0001044
       },
       "C": {
+       "n": 5,
+       "correct_pct": 100.0,
+       "fully_correct": 5,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        5
+       ],
+       "latency_med": 3.42,
+       "cost_mean": 0.00025116
+      },
+      "D": {
        "n": 5,
        "correct_pct": 100.0,
        "fully_correct": 5,
@@ -419,6 +521,22 @@
       ],
       "latency_med": 3.2775,
       "cost_mean": 0.00026398
+     },
+     "D": {
+      "n": 20,
+      "correct_pct": 80.0,
+      "fully_correct": 16,
+      "grounded_pct": 92.5,
+      "trick_pass": [
+       0,
+       3
+      ],
+      "unneeded_refusals": [
+       1,
+       17
+      ],
+      "latency_med": 3.3785,
+      "cost_mean": 0.00030909
      }
     }
    },
@@ -430,12 +548,31 @@
      "scores": {
       "A": 0,
       "B": 0,
-      "C": 0
+      "C": 0,
+      "D": 0
      },
+     "rewritten": true,
      "why": "The answer gives the Q2 2023 shipment figure (265 million) instead of the required total 2023 shipments (~1.17 billion), so it is incorrect, though the cited claim is accurately supported.",
      "check": {
       "level": "low",
       "premise_flagged": true
+     }
+    },
+    {
+     "id": "K5",
+     "group": "Markets",
+     "question": "What will Nvidia's share price close at on 31 December 2035?",
+     "scores": {
+      "A": 2,
+      "B": 2,
+      "C": 2,
+      "D": 0
+     },
+     "rewritten": true,
+     "why": "The answer correctly declines to provide a specific future price, matching the answer key, and accurately notes that the sources only give broad forecasts, though it does not explicitly cite them.",
+     "check": {
+      "level": "low",
+      "premise_flagged": false
      }
     },
     {
@@ -445,8 +582,10 @@
      "scores": {
       "A": 0,
       "B": 0,
-      "C": 0
+      "C": 0,
+      "D": 0
      },
+     "rewritten": false,
      "why": "The answer gives 1,845,985 deliveries, which is incorrect (the correct 2023 delivery figure is 1,808,581) and the cited source lists that number as production, not deliveries.",
      "check": {
       "level": "high",
@@ -460,8 +599,10 @@
      "scores": {
       "A": 2,
       "B": 0,
-      "C": 0
+      "C": 0,
+      "D": 0
      },
+     "rewritten": false,
      "why": "The answer does not state that a fiscal year has only four quarters, thus missing the required correction of the premise, resulting in a correctness score of 0. Its claim that no source provides a fifth‑quarter figure is accurate given the provided snippets, so groundedness is 2. It does not decline to answer.",
      "check": {
       "level": "none",
@@ -485,7 +626,54 @@
      "low": 3,
      "none": 1
     }
-   }
+   },
+   "calibration": {
+    "C": {
+     "high": {
+      "right": 15,
+      "partly": 0,
+      "n": 16
+     },
+     "medium": {
+      "right": 0,
+      "partly": 0,
+      "n": 0
+     },
+     "low": {
+      "right": 2,
+      "partly": 0,
+      "n": 3
+     },
+     "none": {
+      "right": 0,
+      "partly": 0,
+      "n": 1
+     }
+    },
+    "D": {
+     "high": {
+      "right": 16,
+      "partly": 0,
+      "n": 19
+     },
+     "medium": {
+      "right": 0,
+      "partly": 0,
+      "n": 0
+     },
+     "low": {
+      "right": 0,
+      "partly": 0,
+      "n": 0
+     },
+     "none": {
+      "right": 0,
+      "partly": 0,
+      "n": 1
+     }
+    }
+   },
+   "rewritten": 3
   },
   {
    "key": "core",
@@ -495,7 +683,8 @@
    "arms": [
     "A",
     "B",
-    "C"
+    "C",
+    "D"
    ],
    "groups": [
     {
@@ -535,6 +724,22 @@
        "cost_mean": 0.00010507
       },
       "C": {
+       "n": 10,
+       "correct_pct": 95.0,
+       "fully_correct": 9,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        10
+       ],
+       "latency_med": 2.9505,
+       "cost_mean": 0.00027247
+      },
+      "D": {
        "n": 10,
        "correct_pct": 95.0,
        "fully_correct": 9,
@@ -603,6 +808,22 @@
        ],
        "latency_med": 3.2815000000000003,
        "cost_mean": 0.00025675
+      },
+      "D": {
+       "n": 10,
+       "correct_pct": 95.0,
+       "fully_correct": 9,
+       "grounded_pct": 95.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        10
+       ],
+       "latency_med": 3.2815000000000003,
+       "cost_mean": 0.00025675
       }
      }
     },
@@ -643,6 +864,22 @@
        "cost_mean": 0.00011343
       },
       "C": {
+       "n": 10,
+       "correct_pct": 70.0,
+       "fully_correct": 7,
+       "grounded_pct": 75.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        3,
+        10
+       ],
+       "latency_med": 3.1705,
+       "cost_mean": 0.00026617
+      },
+      "D": {
        "n": 10,
        "correct_pct": 70.0,
        "fully_correct": 7,
@@ -711,6 +948,22 @@
        ],
        "latency_med": 2.5860000000000003,
        "cost_mean": 0.00026398000000000003
+      },
+      "D": {
+       "n": 10,
+       "correct_pct": 90.0,
+       "fully_correct": 9,
+       "grounded_pct": 70.0,
+       "trick_pass": [
+        4,
+        10
+       ],
+       "unneeded_refusals": [
+        0,
+        0
+       ],
+       "latency_med": 4.186,
+       "cost_mean": 0.0005066199999999999
       }
      }
     }
@@ -766,6 +1019,22 @@
       ],
       "latency_med": 2.942,
       "cost_mean": 0.0002648425
+     },
+     "D": {
+      "n": 40,
+      "correct_pct": 87.5,
+      "fully_correct": 34,
+      "grounded_pct": 85.0,
+      "trick_pass": [
+       4,
+       10
+      ],
+      "unneeded_refusals": [
+       3,
+       30
+      ],
+      "latency_med": 3.3440000000000003,
+      "cost_mean": 0.0003255025
      }
     }
    },
@@ -777,8 +1046,10 @@
      "scores": {
       "A": 0,
       "B": 1,
-      "C": 1
+      "C": 1,
+      "D": 1
      },
+     "rewritten": false,
      "why": "The answer correctly identifies Austria and the song \"Wasted Love\" and cites sources, but omits the performer JJ, so it receives partial credit.",
      "check": {
       "level": "high",
@@ -792,8 +1063,10 @@
      "scores": {
       "A": 1,
       "B": 1,
-      "C": 1
+      "C": 1,
+      "D": 1
      },
+     "rewritten": false,
      "why": "Provides the correct height but incorrectly calls it a China–India survey, a claim not supported by the cited sources.",
      "check": {
       "level": "high",
@@ -807,8 +1080,10 @@
      "scores": {
       "A": 0,
       "B": 0,
-      "C": 0
+      "C": 0,
+      "D": 0
      },
+     "rewritten": false,
      "why": "The answer does not state the correct 2‑point difference and incorrectly claims the sources lack the needed information.",
      "check": {
       "level": "none",
@@ -822,8 +1097,10 @@
      "scores": {
       "A": 2,
       "B": 0,
-      "C": 0
+      "C": 0,
+      "D": 0
      },
+     "rewritten": false,
      "why": "The answer refuses to provide the required name, which is incorrect, but its claim that the sources lack the president information is accurate.",
      "check": {
       "level": "none",
@@ -837,8 +1114,10 @@
      "scores": {
       "A": 2,
       "B": 0,
-      "C": 0
+      "C": 0,
+      "D": 0
      },
+     "rewritten": false,
      "why": "The answer fails to state the required year (1636), making it incorrect; its statement that the snippets lack the founding year is accurate, so groundedness is high; it effectively declines to provide the answer.",
      "check": {
       "level": "high",
@@ -852,8 +1131,10 @@
      "scores": {
       "A": 2,
       "B": 0,
-      "C": 0
+      "C": 0,
+      "D": 2
      },
+     "rewritten": true,
      "why": "The answer incorrectly states a winner for a future tournament that hasn't occurred, which is wrong per the answer key, though it cites a source that supports the false claim.",
      "check": {
       "level": "low",
@@ -867,8 +1148,10 @@
      "scores": {
       "A": 2,
       "B": 0,
-      "C": 0
+      "C": 0,
+      "D": 2
      },
+     "rewritten": true,
      "why": "The answer incorrectly asserts Einstein won a second Nobel Prize in 1922 instead of correcting the premise that he only won one, and the cited sources do not support a second prize.",
      "check": {
       "level": "low",
@@ -882,8 +1165,10 @@
      "scores": {
       "A": 0,
       "B": 0,
-      "C": 0
+      "C": 0,
+      "D": 0
      },
+     "rewritten": true,
      "why": "The answer fails to correct the false premise or provide the correct score, making it incorrect, but its statement that the sources do not contain the final score is true, and it effectively declines to answer.",
      "check": {
       "level": "low",
@@ -897,8 +1182,10 @@
      "scores": {
       "A": 0,
       "B": 0,
-      "C": 0
+      "C": 0,
+      "D": 2
      },
+     "rewritten": true,
      "why": "The answer incorrectly asserts Hawaii was the 51st state, whereas there are only 50 states; the citation only supports the admission date, not the claim of being the 51st.",
      "check": {
       "level": "low",
@@ -922,7 +1209,111 @@
      "none": 3,
      "low": 10
     }
+   },
+   "calibration": {
+    "C": {
+     "high": {
+      "right": 24,
+      "partly": 2,
+      "n": 27
+     },
+     "medium": {
+      "right": 0,
+      "partly": 0,
+      "n": 0
+     },
+     "low": {
+      "right": 6,
+      "partly": 0,
+      "n": 10
+     },
+     "none": {
+      "right": 1,
+      "partly": 0,
+      "n": 3
+     }
+    },
+    "D": {
+     "high": {
+      "right": 27,
+      "partly": 2,
+      "n": 30
+     },
+     "medium": {
+      "right": 0,
+      "partly": 0,
+      "n": 0
+     },
+     "low": {
+      "right": 5,
+      "partly": 0,
+      "n": 5
+     },
+     "none": {
+      "right": 2,
+      "partly": 0,
+      "n": 5
+     }
+    }
+   },
+   "rewritten": 9
+  }
+ ],
+ "calibration_all": {
+  "C": {
+   "high": {
+    "right": 39,
+    "partly": 2,
+    "n": 43
+   },
+   "medium": {
+    "right": 0,
+    "partly": 0,
+    "n": 0
+   },
+   "low": {
+    "right": 8,
+    "partly": 0,
+    "n": 13
+   },
+   "none": {
+    "right": 1,
+    "partly": 0,
+    "n": 4
+   }
+  },
+  "D": {
+   "high": {
+    "right": 43,
+    "partly": 2,
+    "n": 49
+   },
+   "medium": {
+    "right": 0,
+    "partly": 0,
+    "n": 0
+   },
+   "low": {
+    "right": 5,
+    "partly": 0,
+    "n": 5
+   },
+   "none": {
+    "right": 2,
+    "partly": 0,
+    "n": 6
    }
   }
- ]
+ },
+ "known_issues": [
+  {
+   "id": "K5",
+   "status": "open",
+   "fix": "planned as arm E (locked separately before it runs)",
+   "title": "Forecasts treated as facts",
+   "detail": "Asked for Nvidia's closing price on 31 December 2035, SearchIQ correctly said it can't be known. Its check then marked that as contradicted, because the search results contained price forecasts. The rewrite replaced the correct answer with $619–$20,000 forecasts. Until arm E ships, treat any forward-looking number in a rewritten answer as a forecast, not a fact.",
+   "affects": "Questions about future prices, earnings or events (rewritten answers only)"
+  }
+ ],
+ "calibration_note": "Read honestly: HIGH means something (right about 9 times in 10). LOW does not yet mean \"probably wrong\". With claim checking alone (C), LOW answers were right 8 of 13. After rewrites (D), all 5 LOW answers were right: they're corrected trick answers whose correct claims (\"no human has walked on Mars\") just aren't stated in the sources. MEDIUM was never assigned. Treat LOW as \"verify this\", not as \"this is wrong\"."
 }

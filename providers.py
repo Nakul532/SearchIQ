@@ -216,6 +216,9 @@ def search(query: str, max_results: int = 3) -> list[dict]:
 # --------------------------------------------------------------------------- #
 def _fake_answer(model: str, prompt: str, system: str) -> str:
     label = model_label(model)
+    if "SearchIQ's editor" in system:
+        return ("Einstein won only one Nobel Prize: the 1921 Nobel Prize in Physics, awarded in 1922 [1][2]. "
+                "There was no second prize.")
     if "fact checker" in system and "second Nobel" in prompt:  # demo of a flagged premise
         return ('{"premise":{"ok":false,"note":"Einstein won only one Nobel Prize (Physics, 1921)."},"claims":['
                 '{"side":"A","text":"Einstein won one Nobel Prize, in Physics","status":"backed","sources":[1],"note":""},'

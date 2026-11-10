@@ -7,6 +7,7 @@ appended to eval/results/*.jsonl after each call, and finished items are skipped
     python eval/searchiq_eval.py answer     # 40 Tavily searches + 80 answers
     python eval/searchiq_eval.py judge      # 80 judge verdicts (+ arm C once it exists)
     python eval/searchiq_eval.py arm_c      # arm C: SearchIQ v2 = B's answer + the agent's claim check
+    python eval/searchiq_eval.py arm_d      # arm D: C, but flagged answers are rewritten (then judge again)
     python eval/searchiq_eval.py sample     # writes results/human_scores.csv (10 random)
     python eval/searchiq_eval.py agree      # judge-vs-human agreement
     python eval/searchiq_eval.py report     # eval/README.md results + eval/chart.svg
@@ -44,6 +45,7 @@ ANSWERS = os.path.join(RESULTS, "answers.jsonl")
 SEARCHES = os.path.join(RESULTS, "searches.jsonl")
 JUDGE = os.path.join(RESULTS, "judge.jsonl")
 ARM_C = os.path.join(RESULTS, "arm_c.jsonl")
+ARM_D = os.path.join(RESULTS, "arm_d.jsonl")
 BUDGET = os.path.join(RESULTS, "budget.json")
 HUMAN = os.path.join(RESULTS, "human_scores.csv")
 
@@ -119,7 +121,7 @@ def judge_user(q: dict, arm: str, answer: str, results: list[dict]) -> str:
     return (f"QUESTION GROUP: {q['group']}{' (TRICK question)' if is_trick(q) else ''}\n"
             f"QUESTION: {q['question']}\n"
             f"ANSWER KEY: {q['answer_key']}\nGRADING NOTES: {q['grading_notes']}\n"
-            f"ANSWER HAD SOURCES: {'yes (numbered [1]-[3], same as the reference snippets)' if arm in ('B', 'C') else 'no'}\n\n"
+            f"ANSWER HAD SOURCES: {'yes (numbered [1]-[3], same as the reference snippets)' if arm in ('B', 'C', 'D') else 'no'}\n\n"
             f"REFERENCE SNIPPETS:\n{refs}\n\nANSWER TO GRADE:\n{answer}")
 
 
@@ -328,6 +330,57 @@ def cmd_arm_c() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Step 1c: arm D — the check acts (rewrite flagged answers)
+# --------------------------------------------------------------------------- #
+# Arm D continues arm C's pipeline from C's own check of B's answer. When that
+# check flags a false premise or a contradicted claim (agent.needs_revision),
+# agent.revise_flagged() rewrites the answer and re-checks the rewrite; arm D's
+# text is the rewrite + its check note (with the "Rewritten by SearchIQ's check"
+# line). Otherwise D's text is identical to C's, so it inherits C's verdict
+# instead of being re-judged (no judge noise on unchanged answers).
+def cmd_arm_d() -> None:
+    qs = {q["id"]: q for q in questions()}
+    searches = {r["id"]: r for r in load_jsonl(SEARCHES)}
+    c_rows = {r["id"]: r for r in load_jsonl(ARM_C)}
+    b_rows = {r["id"]: r for r in load_jsonl(ANSWERS) if r["arm"] == "B"}
+    done = {r["id"] for r in load_jsonl(ARM_D)}
+    for qid, c in c_rows.items():
+        if qid in done:
+            continue
+        check = c.get("check")
+        row = {**c, "arm": "D", "same_as_c": True, "revised": False, "revision_reasons": []}
+        if check and agent.needs_revision(check, "B"):
+            if not room(ANSWER_MODEL, 6000):
+                print(f"Daily token cap for {ANSWER_MODEL} reached ({DAILY_TOKEN_CAP}). Rerun tomorrow to resume.")
+                return
+            spent: list[tuple[dict, float]] = []
+
+            def llm(system, user, max_tokens, effort):
+                text, usage, secs = call(ANSWER_MODEL, system, user, max_tokens=max_tokens, effort=effort)
+                spent.append((usage, secs))
+                return text
+
+            new_check, revs = agent.revise_flagged(qs[qid]["question"], searches[qid]["results"],
+                                                   {"B": b_rows[qid]["answer"]}, check, llm=llm,
+                                                   n_sources=sa.MAX_SOURCES)
+            usage = {k: sum(u.get(k, 0) for u, _ in spent) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+            if "B" in revs:
+                note = agent.render_note(new_check, "B", revs["B"]["reasons"])
+                row.update({
+                    "answer": revs["B"]["answer"] + "\n\n" + note, "check": new_check, "first_check": check,
+                    "same_as_c": False, "revised": True, "revision_reasons": revs["B"]["reasons"],
+                    "revise_usage": usage,
+                    "latency_s": round(c["latency_s"] + sum(t for _, t in spent), 3),
+                    "cost_usd": round(c["cost_usd"] + cost(ANSWER_MODEL, usage), 7),
+                    "backend": "openrouter→groq" if BACKEND == "openrouter" else "groq",
+                })
+        append_jsonl(ARM_D, row)
+        lvl = row["check"]["sides"]["B"]["confidence"]["level"] if row.get("check") else "no check"
+        print(f"{qid}/D: {'rewritten' if row['revised'] else 'unchanged'}, {lvl}", flush=True)
+    print("Arm D done.")
+
+
+# --------------------------------------------------------------------------- #
 # Step 2: judge
 # --------------------------------------------------------------------------- #
 def parse_verdict(text: str) -> dict:
@@ -344,7 +397,7 @@ def cmd_judge() -> None:
     qs = {q["id"]: q for q in questions()}
     searches = {r["id"]: r for r in load_jsonl(SEARCHES)}
     done = {(r["id"], r["arm"]) for r in load_jsonl(JUDGE)}
-    answers = load_jsonl(ANSWERS) + load_jsonl(ARM_C)
+    answers = load_jsonl(ANSWERS) + load_jsonl(ARM_C) + load_jsonl(ARM_D)
     for a in answers:
         if (a["id"], a["arm"]) in done:
             continue
@@ -352,6 +405,12 @@ def cmd_judge() -> None:
             print(f"Daily token cap for {JUDGE_MODEL} reached ({DAILY_TOKEN_CAP}). Rerun tomorrow to resume.")
             return
         q = qs[a["id"]]
+        if a.get("same_as_c"):  # arm D, unchanged text → C's verdict
+            cv = next((r for r in load_jsonl(JUDGE) if r["id"] == a["id"] and r["arm"] == "C"), None)
+            if cv:
+                append_jsonl(JUDGE, {**cv, "arm": "D", "inherited_from": "C"})
+                print(f"{a['id']}/D: inherited C{cv['correctness']} G{cv['groundedness']}", flush=True)
+            continue
         user = judge_user(q, a["arm"], a["answer"], searches[a["id"]]["results"])
         for attempt in range(2):
             text, usage, _ = call(JUDGE_MODEL, JUDGE_SYSTEM, user, max_tokens=1500, effort="medium")
@@ -427,10 +486,10 @@ def cmd_agree() -> None:
 # Step 4: report
 # --------------------------------------------------------------------------- #
 def summarize() -> dict:
-    answers = {(r["id"], r["arm"]): r for r in load_jsonl(ANSWERS) + load_jsonl(ARM_C)}
+    answers = {(r["id"], r["arm"]): r for r in load_jsonl(ANSWERS) + load_jsonl(ARM_C) + load_jsonl(ARM_D)}
     judge = {(r["id"], r["arm"]): r for r in load_jsonl(JUDGE)}
     qs = {q["id"]: q for q in questions()}
-    arms = ["A", "B"] + (["C"] if any(k[1] == "C" for k in answers) else [])
+    arms = [a for a in ("A", "B", "C", "D") if any(k[1] == a for k in answers)]
     out = {}
     for g in GROUPS + ["all"]:
         for arm in arms:
@@ -451,6 +510,30 @@ def summarize() -> dict:
                 "cost_mean": statistics.mean(a["cost_usd"] for a in ans) if ans else None,
                 "tavily": sum(a["tavily_credits"] for a in ans),
             }
+    return out
+
+
+def calibration() -> dict:
+    """Is the confidence label honest? For arms C and D: of the answers labelled
+    HIGH / MEDIUM / LOW / NONE (no checkable claims), how many did the judge score
+    fully right (correctness 2)? Uses the label on the answer as shown (for a
+    rewritten D answer, the re-check's label)."""
+    judge = {(r["id"], r["arm"]): r for r in load_jsonl(JUDGE)}
+    out = {}
+    for arm, path in (("C", ARM_C), ("D", ARM_D)):
+        rows = load_jsonl(path)
+        if not rows:
+            continue
+        levels = {lv: {"right": 0, "partly": 0, "n": 0} for lv in ("high", "medium", "low", "none")}
+        for r in rows:
+            j = judge.get((r["id"], arm))
+            if not j or not r.get("check"):
+                continue
+            lv = r["check"]["sides"]["B"]["confidence"]["level"]
+            levels[lv]["n"] += 1
+            levels[lv]["right"] += j["correctness"] == 2
+            levels[lv]["partly"] += j["correctness"] == 1
+        out[arm] = levels
     return out
 
 
@@ -498,8 +581,8 @@ def chart_svg(s: dict) -> str:
     names = {"recent": "Recent", "stable": "Stable (control)", "multistep": "Multi-step",
              "trick": "Trick", "all": "Overall", "companies": "Companies", "markets": "Markets",
              "earnings": "Earnings", "acquisitions": "Acquisitions", "postcutoff": "† Post-cutoff"}
-    col = {"A": "#94a3b8", "B": "#4f46e5", "C": "#0d9488"}
-    arms = [a for a in ("A", "B", "C") if (groups[0], a) in s]
+    col = {"A": "#94a3b8", "B": "#4f46e5", "C": "#0d9488", "D": "#d97706"}
+    arms = [a for a in ("A", "B", "C", "D") if (groups[0], a) in s]
     slot = plot_w / len(groups)
     bw = slot * (0.64 / len(arms))
     fs = 12 if len(arms) == 2 else 10
@@ -520,12 +603,12 @@ def chart_svg(s: dict) -> str:
             parts.append(f'<text x="{x+bw/2:.1f}" y="{T+plot_h-h-4:.1f}" text-anchor="middle" font-size="{fs}" fill="#111827">{v:.0f}</text>')
         parts.append(f'<text x="{L+i*slot+slot/2:.1f}" y="{T+plot_h+18:.1f}" text-anchor="middle" fill="#374151">{names[g]}</text>')
     lx = L
-    for arm, label in (("A", "A: no retrieval"), ("B", "B: SearchIQ + Tavily"), ("C", "C: B + v2 claim check")):
+    for arm, label in (("A", "A: no retrieval"), ("B", "B: SearchIQ + Tavily"), ("C", "C: B + v2 claim check"), ("D", "D: C + rewrite")):
         if arm not in arms:
             continue
         parts.append(f'<rect x="{lx}" y="{H-18}" width="12" height="12" fill="{col[arm]}" rx="2"/>')
         parts.append(f'<text x="{lx+18}" y="{H-8}" fill="#374151">{label}</text>')
-        lx += 170
+        lx += 170 if len(arms) == 2 else 140
     parts.append("</svg>")
     return "\n".join(parts)
 
@@ -542,6 +625,11 @@ def cmd_report() -> None:
         with open(os.path.join(RESULTS, "checker_diagnostics.json"), "w") as f:
             json.dump(diag, f, indent=1)
         print("checker:", json.dumps(diag))
+    cal = calibration()
+    if cal:
+        with open(os.path.join(RESULTS, "calibration.json"), "w") as f:
+            json.dump(cal, f, indent=1)
+        print("calibration:", json.dumps(cal))
     print("Wrote eval/chart.svg and results/summary.json")
     print(json.dumps({f"{g}|{a}": v for (g, a), v in s.items()}, indent=1))
     ag = agreement()
@@ -550,14 +638,14 @@ def cmd_report() -> None:
 
 
 if __name__ == "__main__":
-    cmds = {"answer": cmd_answer, "arm_c": cmd_arm_c, "judge": cmd_judge, "sample": cmd_sample,
+    cmds = {"answer": cmd_answer, "arm_c": cmd_arm_c, "arm_d": cmd_arm_d, "judge": cmd_judge, "sample": cmd_sample,
             "agree": cmd_agree, "report": cmd_report}
     if len(sys.argv) != 2 or sys.argv[1] not in cmds:
         print(__doc__)
         raise SystemExit(2)
     if BACKEND == "openrouter" and not os.environ.get("OPENROUTER_API_KEY"):
         raise SystemExit("EVAL_BACKEND=openrouter needs OPENROUTER_API_KEY in .env.")
-    if BACKEND != "openrouter" and sys.argv[1] in ("answer", "arm_c", "judge") and not (os.environ.get("GROQ_API_KEY") and
+    if BACKEND != "openrouter" and sys.argv[1] in ("answer", "arm_c", "arm_d", "judge") and not (os.environ.get("GROQ_API_KEY") and
                                                     (os.environ.get("TAVILY_API_KEY") or sys.argv[1] == "judge")):
         if not providers.fake_mode():
             raise SystemExit("Set GROQ_API_KEY and TAVILY_API_KEY in .env first.")
