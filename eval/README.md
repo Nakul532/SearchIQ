@@ -126,6 +126,8 @@ What the rewrites did:
 
 Cost: rewritten answers take ~1.3s more and two extra GPT-OSS 20B calls (rewrite + re-check). Unflagged answers cost nothing extra.
 
+**Known issue (open):** the K5 failure, forecasts treated as facts, is listed on the Track Record page. It will be fixed in a separately locked arm E; arm D's results stay as they are.
+
 ## Calibration: are the confidence labels honest?
 
 For each label shown on an answer: how many the judge scored fully right (correctness 2). Both sets combined; per-set tables are on the Track Record page and in `results*/calibration.json`.

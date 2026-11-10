@@ -125,6 +125,15 @@ def main() -> None:
                 for k in t:
                     t[k] += v[k]
     data["calibration_all"] = both
+    data["known_issues"] = [{
+        "id": "K5", "status": "open", "fix": "planned as arm E (locked separately before it runs)",
+        "title": "Forecasts treated as facts",
+        "detail": ("Asked for Nvidia's closing price on 31 December 2035, SearchIQ correctly said it can't be known. "
+                   "Its check then marked that as contradicted, because the search results contained price "
+                   "forecasts. The rewrite replaced the correct answer with $619–$20,000 forecasts. Until arm E "
+                   "ships, treat any forward-looking number in a rewritten answer as a forecast, not a fact."),
+        "affects": "Questions about future prices, earnings or events (rewritten answers only)",
+    }]
     data["calibration_note"] = (
         "Read honestly: HIGH means something (right about 9 times in 10). LOW does not yet mean \"probably wrong\". "
         "With claim checking alone (C), LOW answers were right 8 of 13. After rewrites (D), all 5 LOW answers were right: "

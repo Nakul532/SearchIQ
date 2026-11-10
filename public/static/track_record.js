@@ -132,6 +132,16 @@ function method(data) {
     }
     document.getElementById("tr-sets").innerHTML = data.sets.map((s) => setSection(s, data.arms)).join("");
     document.getElementById("tr-method").innerHTML = method(data);
+    if (data.known_issues && data.known_issues.length) {
+      const ki = document.createElement("section");
+      ki.className = "tr-panel tr-issues";
+      ki.id = "known-issues";
+      ki.innerHTML = `<h2>Known issues</h2>` + data.known_issues.map((k) => `
+        <div class="tr-issue"><div class="tr-issue-head"><span class="tr-tag">${esc(k.id)}</span>
+          <b>${esc(k.title)}</b> <span class="tr-issue-status">${esc(k.status)} · fix ${esc(k.fix)}</span></div>
+          <p>${esc(k.detail)}</p><p class="tr-note">Affects: ${esc(k.affects)}</p></div>`).join("");
+      document.getElementById("tr-sets").before(ki);
+    }
   } catch (e) {
     sum.innerHTML = `<div class="tr-loading">Couldn't load the results right now. The raw data is on <a href="https://github.com/Nakul532/SearchIQ/tree/main/eval">GitHub</a>.</div>`;
   }
