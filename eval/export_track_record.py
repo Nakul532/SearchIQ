@@ -38,7 +38,7 @@ NAMES = {"companies": "Companies", "markets": "Markets", "earnings": "Earnings",
 ARMS = {"A": "Model alone (no search)", "B": "SearchIQ: search + cited answer", "C": "SearchIQ v2: B + claim check",
         "D": "SearchIQ v2: the check rewrites flagged answers"}
 # Flip to True only after the live false-premise smoke test passes (twice).
-LIVE_REWRITE_VERIFIED = False
+LIVE_REWRITE_VERIFIED = True  # verified 2026-11-10: 2/2 live false-premise tests on the prepaid key
 
 
 def jl(path):
