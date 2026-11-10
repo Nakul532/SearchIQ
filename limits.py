@@ -315,8 +315,10 @@ def cached_examples(conn) -> list[dict]:
     """The example chips that are actually in the cache (for the limit card)."""
     out = []
     for q in EXAMPLE_QUERIES:
-        row = conn.execute("SELECT created_at FROM answer_cache WHERE key = ?",
+        row = conn.execute("SELECT created_at, payload FROM answer_cache WHERE key = ?",
                            (normalize(q),)).fetchone()
-        if row:
+        # An A/B example cached before the v2 agent (no "check") is regenerated on
+        # its next request, so don't offer it as a free cached answer yet.
+        if row and not ('"kind": "ab"' in (row[1] or "") and '"check"' not in (row[1] or "")):
             out.append({"query": q, "cached_at": row[0]})
     return out
