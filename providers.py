@@ -205,6 +205,19 @@ def search(query: str, max_results: int = 3) -> list[dict]:
 # --------------------------------------------------------------------------- #
 def _fake_answer(model: str, prompt: str, system: str) -> str:
     label = model_label(model)
+    if "fact checker" in system and "second Nobel" in prompt:  # demo of a flagged premise
+        return ('{"premise":{"ok":false,"note":"Einstein won only one Nobel Prize (Physics, 1921)."},"claims":['
+                '{"side":"A","text":"Einstein won one Nobel Prize, in Physics","status":"backed","sources":[1],"note":""},'
+                '{"side":"B","text":"Einstein won a second Nobel Prize in 1922","status":"contradicted","sources":[2],'
+                '"note":"Source 2 says the 1921 prize was awarded in 1922; there was no second prize."}],'
+                '"disagreements":[{"topic":"Number of Nobel Prizes","A":"One (1921)","B":"Two (second in 1922)",'
+                '"supported":"A","sources":[1,2]}]}')
+    if "fact checker" in system:
+        return ('{"premise":{"ok":true,"note":""},"claims":['
+                '{"side":"A","text":"Fake claim one","status":"backed","sources":[1],"note":""},'
+                '{"side":"B","text":"Fake claim one","status":"backed","sources":[1],"note":""},'
+                '{"side":"B","text":"Fake claim two","status":"unsupported","sources":[],"note":""}],'
+                '"disagreements":[]}')
     if "follow-up questions" in prompt:
         return "What are the key details?\nHow has this changed recently?\nWhere can I learn more?"
     if "clarifying question" in prompt:

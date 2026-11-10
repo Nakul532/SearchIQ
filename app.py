@@ -29,6 +29,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import db as dbmod
 import limits
 import providers
+import agent
 import search_agent as sa
 
 sa.sanitize_env_secret("GROQ_API_KEY")
@@ -304,12 +305,15 @@ def _lesson_context(conn, sid: str, query: str):
 def api_query():
     """Stream an A/B answer pair as newline-delimited JSON (NDJSON).
 
-    Event types: clarify | meta | answer | comparison | single | limit | quota |
-    error (see public/static/app.js for the consumer). Order of checks:
+    Event types: clarify | meta | step | answer | check | comparison | single |
+    limit | quota | error (see public/static/app.js for the consumer). Order:
       1. first turn → serve from cache if we have it (free, no cap)
       2. ambiguous → ask one clarifying question (no search)
       3. over a cap → limit card (with demo link + cached examples)
-      4. live: one Tavily search → Groq drafts A and B in parallel
+      4. live: one Tavily search → Groq drafts A and B in parallel → the v2
+         agent checks both drafts against the sources (agent.py)
+    `step` events drive the steps panel: {step: search|draft|check|cache,
+    status: active|done|skipped, detail}.
     """
     data = request.get_json(silent=True) or {}
     query = str(data.get("query", "")).strip()[:1000]
@@ -351,6 +355,10 @@ def api_query():
             # context), except the example questions, which are always served cached.
             use_cache = first_turn or limits.is_example(query)
             cached = limits.cache_get(conn, query) if use_cache and not force else None
+            # Example answers cached before the v2 agent have no check: regenerate
+            # them once so the showcase questions show the claim check.
+            if cached and cached.get("kind") == "ab" and limits.is_example(query) and "check" not in cached:
+                cached = None
             if cached and cached.get("kind") == "clarify" and not force:
                 sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
                                 role="user", content=query)
@@ -399,13 +407,6 @@ def api_query():
                 prev_user = next((h["content"] for h in reversed(history) if h["role"] == "user"), "")
                 if prev_user and len(query.split()) < 12:
                     search_q = f"{prev_user} — {query}"
-            try:
-                results = providers.search(search_q, max_results=sa.MAX_SOURCES)
-            except providers.ProviderLimit:
-                yield emit(limits.limit_info("site", limits.cached_examples(conn)))
-                return
-            limits.record_search_spend(conn)
-
             yield emit({
                 "type": "meta", "group_id": group, "conversation_id": conversation_id,
                 "original_query": query, "effective_query": query,
@@ -413,6 +414,20 @@ def api_query():
                 "applied_lessons": applied, "applied_count": len(applied),
                 "personalized": personalized, "cached": False,
             })
+            yield emit({"type": "step", "step": "search", "status": "active",
+                        "detail": "Searching the web"})
+            try:
+                results = providers.search(search_q, max_results=sa.MAX_SOURCES)
+            except providers.ProviderLimit:
+                yield emit(limits.limit_info("site", limits.cached_examples(conn)))
+                return
+            limits.record_search_spend(conn)
+            hosts = list(dict.fromkeys(h for h in (_host(r.get("url")) for r in results) if h))
+            yield emit({"type": "step", "step": "search", "status": "done",
+                        "detail": f"{len(results)} source{'s' if len(results) != 1 else ''}"
+                                  + (f": {', '.join(hosts)}" if hosts else "")})
+            yield emit({"type": "step", "step": "draft", "status": "active",
+                        "detail": "Writing answers A and B from the same sources"})
 
             results_by_side: dict[str, dict] = {}
             limited = False
@@ -425,6 +440,20 @@ def api_query():
                                 "answer": res["answer"], "sources": res["sources"]})
                 elif res.get("limit"):
                     limited = True
+
+            yield emit({"type": "step", "step": "draft", "status": "done" if results_by_side else "skipped",
+                        "detail": f"{len(results_by_side)} of 2 drafts"})
+            check = None
+            if results_by_side:
+                yield emit({"type": "step", "step": "check", "status": "active",
+                            "detail": "Checking each claim against the sources"})
+                check = agent.check_answers(query, results,
+                                            {s: r["answer"] for s, r in results_by_side.items()},
+                                            n_sources=sa.MAX_SOURCES)
+                if check:
+                    yield emit({"type": "check", **check})
+                yield emit({"type": "step", "step": "check", "status": "done" if check else "skipped",
+                            "detail": _check_summary(check) if check else "Check unavailable this time"})
 
             if not results_by_side:
                 if limited:
@@ -454,6 +483,7 @@ def api_query():
                         "kind": "ab", "routing": routing, "routing_a": routing_a,
                         "routing_b": routing_b,
                         "A": results_by_side["A"], "B": results_by_side["B"],
+                        "check": check,
                     })
                 yield emit({"type": "comparison", "comparison_id": comparison_id})
             else:
@@ -499,9 +529,15 @@ def _serve_cached(conn, cached: dict, query: str, sid: str, conversation_id: str
         "applied_lessons": [], "applied_count": 0, "personalized": False,
         "cached": True, "cached_at": cached["cached_at"],
     })
+    yield emit({"type": "step", "step": "cache", "status": "done",
+                "detail": "Served from the answer cache: no new search"})
     for side in ("A", "B"):
         yield emit({"type": "answer", "side": side, "answer": cached[side]["answer"],
                     "sources": cached[side]["sources"]})
+    if cached.get("check"):
+        yield emit({"type": "check", **cached["check"]})
+        yield emit({"type": "step", "step": "check", "status": "done",
+                    "detail": _check_summary(cached["check"]) + " (checked when cached)"})
     sa.save_message(conn, session_id=sid, conversation_id=conversation_id,
                     role="user", content=query)
     comparison_id = sa.record_comparison(
@@ -511,6 +547,28 @@ def _serve_cached(conn, cached: dict, query: str, sid: str, conversation_id: str
         routing_a=routing_a, routing_b=routing_b,
     )
     yield emit({"type": "comparison", "comparison_id": comparison_id})
+
+
+def _host(url) -> str:
+    from urllib.parse import urlparse
+    try:
+        h = urlparse(url or "").hostname or ""
+    except ValueError:
+        return ""
+    return h[4:] if h.startswith("www.") else h
+
+
+def _check_summary(check: dict) -> str:
+    parts = []
+    for side, s in sorted(check["sides"].items()):
+        c = s["confidence"]
+        parts.append(f"{side}: {c['backed']}/{c['total']} claims backed" if c["total"] else f"{side}: no checkable claims")
+    if not check["premise"]["ok"]:
+        parts.append("premise flagged")
+    if check.get("disagreements"):
+        n = len(check["disagreements"])
+        parts.append(f"{n} disagreement{'s' if n != 1 else ''}")
+    return " · ".join(parts)
 
 
 def _owned_comparison(conn, comparison_id) -> dict | None:

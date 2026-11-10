@@ -163,10 +163,17 @@ def test_guest_can_search_without_signing_in():
     assert me["guest"] is True and me["user"] is None
     assert me["quota"]["remaining"] == 3
     ev = ask(c, "How does photosynthesis convert light into energy in plants?")
-    assert types(ev) == ["meta", "answer", "answer", "comparison", "quota"]
+    assert [t for t in types(ev) if t != "step"] == ["meta", "answer", "answer", "check", "comparison", "quota"]
     assert ev[0]["cached"] is False
     assert {e["side"] for e in ev if e["type"] == "answer"} == {"A", "B"}
     assert ev[-1]["remaining"] == 2
+    steps = [(e["step"], e["status"]) for e in ev if e["type"] == "step"]
+    assert steps == [("search", "active"), ("search", "done"), ("draft", "active"), ("draft", "done"),
+                     ("check", "active"), ("check", "done")]
+    check = next(e for e in ev if e["type"] == "check")
+    assert check["premise"]["ok"] is True
+    assert check["sides"]["A"]["confidence"] == {"level": "high", "backed": 1, "total": 1, "contradicted": 0}
+    assert check["sides"]["B"]["confidence"]["level"] == "medium"   # 1 of 2 backed
 
 
 def test_complex_query_routes_ab_to_fast_and_deep_models():
@@ -296,7 +303,8 @@ def test_cached_answer_shows_date_and_is_free():
     before = c.get("/api/me").get_json()["quota"]["remaining"]
     again = ask(client("7.7.7.7"), q.upper() + "  ", conv="b")  # normalized match, new user
     assert again[0]["cached"] is True and again[0]["cached_at"]
-    assert types(again) == ["meta", "answer", "answer", "comparison", "quota"]
+    assert types(again) == ["meta", "step", "answer", "answer", "check", "step", "comparison", "quota"]
+    assert next(e for e in again if e["type"] == "check")["sides"]["B"]["claims"]  # check is cached too
     assert c.get("/api/me").get_json()["quota"]["remaining"] == before
     # The cached pair is a real comparison for the new user (pick still works).
 
@@ -371,3 +379,27 @@ def test_starts_cleanly_on_vercel_without_google_vars():
     env.update(VERCEL="1", FLASK_SECRET_KEY="x" * 64)
     r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True)
     assert r.returncode == 0 and "ok" in r.stdout, r.stderr[-2000:]
+
+
+def test_agent_check_normalizes_and_labels_deterministically():
+    import agent
+    raw = {"premise": {"ok": False, "note": "The event has not happened."},
+           "claims": [{"side": "B", "text": "X won", "status": "backed", "sources": [1]},
+                      {"side": "B", "text": "No source given", "status": "backed", "sources": []},
+                      {"side": "B", "text": "Bad source", "status": "contradicted", "sources": [9, 2]},
+                      {"side": "Z", "text": "ignored", "status": "backed", "sources": [1]},
+                      {"side": "A", "text": "ignored status", "status": "maybe", "sources": [1]}],
+           "disagreements": [{"topic": "Winner", "A": "not yet", "B": "X", "supported": "a", "sources": [1]}]}
+    c = agent.normalize(raw, ["A", "B"], 3)
+    b = c["sides"]["B"]
+    assert [x["status"] for x in b["claims"]] == ["backed", "unsupported", "contradicted"]
+    assert b["claims"][2]["sources"] == [2]                       # out-of-range source dropped
+    assert b["confidence"]["level"] == "low"                       # false premise → low
+    assert c["sides"]["A"]["confidence"]["level"] == "low"
+    assert c["disagreements"][0]["supported"] == "A"
+    note = agent.render_note(c, "B")
+    assert "premise" in note and "✗ Contradicted [2]" in note and "Double-check" in note
+    ok = agent.normalize({"claims": [{"side": "A", "text": "t", "status": "backed", "sources": [1]}]}, ["A"], 3)
+    assert ok["sides"]["A"]["confidence"]["level"] == "high" and ok["disagreements"] == []
+    assert agent.check_answers("q", [], {"A": "a"}, llm=lambda *a: "not json") is None
+

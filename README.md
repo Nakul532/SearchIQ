@@ -21,7 +21,8 @@ It runs at **$0** on free tiers:
 2. **Clarify.** A vague query ("best tools") gets one clarifying question. No search is spent.
 3. **Caps.** Guests get 3 live searches/day per cookie, plus a cap of 10/day per hashed IP, so clearing cookies doesn't reset it. Signed-in users get 10/day. There's also a site-wide daily/monthly cap and a per-model Groq token budget. Any limit, including a real 429 from Groq or Tavily, shows a friendly limit card with the demo video and cached examples. It's never an error page.
 4. **Live.** One Tavily search runs, then Groq drafts A (concise) and B (detailed) in parallel from the same results. Simple/medium queries use GPT-OSS 20B. Complex queries split A = GPT-OSS 20B, B = GPT-OSS 120B.
-5. **Learn.** Pick a winner, then give a reason. That produces rewards, lessons and a policy. A 👎 retry reuses the original sources, so no new search is spent.
+5. **Check (v2 agent).** One more GPT-OSS 20B call (~2–3K tokens) checks both drafts against the numbered sources. Each key claim is labelled **✓ Backed [n]**, **⚠ Double-check** (not in the sources) or **✗ Contradicted [n]**. Each answer gets a confidence label (High/Medium/Low), computed from those labels rather than asked of the model. A false premise in the question is flagged above the answers, and a **Where A and B disagree** panel shows which side the sources support. A **steps panel** shows what ran (search → draft → check). If the check fails or hits a limit, the answers still show, just without labels. The check is cached with the answer.
+6. **Learn.** Pick a winner, then give a reason. That produces rewards, lessons and a policy. A 👎 retry reuses the original sources, so no new search is spent.
 
 Guests can do everything. Google sign-in is optional and adds a personality profile that personalizes answers.
 
@@ -54,6 +55,7 @@ The CLI still works: `python search_agent.py`.
 ## Files
 
 - `app.py`: Flask app and the Vercel entrypoint. Holds the JSON/NDJSON API, guest/Google identity and the limit card.
+- `agent.py`: the v2 claim check (prompt, normalization, confidence labels).
 - `search_agent.py`: routing, A/B generation, lessons, rewards, policy, profiles, metrics.
 - `providers.py`: Groq and Tavily clients. A 429 is raised as `ProviderLimit`.
 - `limits.py`: caps, token budgets, answer cache.
