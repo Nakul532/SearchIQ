@@ -458,18 +458,35 @@ def agreement() -> dict | None:
         for r in csv.DictReader(f):
             c, g, d = (r["your_correctness_0_1_2"].strip(), r["your_groundedness_0_1_2"].strip(),
                        r["your_declined_true_false"].strip().lower())
-            if not (c and g and d):
-                return None  # not filled in yet
+            if not (c or g or d):
+                continue
             j = judge[(r["id"], r["arm"])]
-            human = {"correctness": int(c), "groundedness": int(g), "declined": d in ("true", "t", "yes", "1")}
-            for k in per:
-                per[k][0] += int(human[k] == j[k])
+            # Score only the criteria the person filled in (a blank column is
+            # "not scored", never counted as a disagreement).
+            human = {}
+            if c:
+                human["correctness"] = int(c)
+            if g:
+                human["groundedness"] = int(g)
+            if d:
+                human["declined"] = d in ("true", "t", "yes", "1")
+            for k, v in human.items():
+                per[k][0] += int(v == j[k])
                 per[k][1] += 1
             rows.append({"id": r["id"], "arm": r["arm"], "human": human,
                          "judge": {k: j[k] for k in per}})
-    total = sum(v[0] for v in per.values()), sum(v[1] for v in per.values())
-    return {"per_criterion": {k: v[0] / v[1] for k, v in per.items()},
-            "overall": total[0] / total[1], "n_answers": len(rows), "rows": rows}
+    if not rows:
+        return None  # not filled in yet
+    scored = {k: v for k, v in per.items() if v[1]}
+    total = sum(v[0] for v in scored.values()), sum(v[1] for v in scored.values())
+    right_h = sum(r["human"].get("correctness") == 2 for r in rows if "correctness" in r["human"])
+    return {"per_criterion": {k: {"agree": v[0], "n": v[1], "rate": v[0] / v[1]} for k, v in scored.items()},
+            "not_scored": [k for k, v in per.items() if not v[1]],
+            "overall": total[0] / total[1], "agree": total[0], "labels": total[1],
+            "n_answers": len(rows), "human_right": right_h,
+            "disagreements": [{"id": r["id"], "arm": r["arm"], "human": r["human"], "judge": r["judge"]}
+                              for r in rows if any(r["human"][k] != r["judge"][k] for k in r["human"])],
+            "rows": rows}
 
 
 def cmd_agree() -> None:

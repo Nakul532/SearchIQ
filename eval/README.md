@@ -145,7 +145,17 @@ For each label shown on an answer: how many the judge scored fully right (correc
 
 ## Judge agreement
 
-**Pending your hand scores.** [results/human_scores.csv](results/human_scores.csv) holds 10 answers drawn with `random.Random(42)`, without the judge's scores. Fill in the three `your_*` columns, then run `python eval/searchiq_eval.py agree`. Until then, the judge's scores are unverified.
+10 core-set answers were drawn at random (`random.Random(42)`, written to [results/human_scores.csv](results/human_scores.csv) without the judge's scores) and scored by hand **for correctness only**. Groundedness and declined weren't hand-scored, and are left blank rather than guessed.
+
+| Criterion | Human vs judge |
+|---|---|
+| Correctness (0/1/2) | **agree on 10 of 10** |
+| Groundedness | not human-checked |
+| Declined | not human-checked |
+
+Rows: M7/A, M10/B, R7/B, R5/B, M8/B, M6/B, T4/B, M5/B and S7/A, all correct (2) for both human and judge. R4/A was incorrect (0) for both: it doesn't name Han Kang and claims the 2024 Literature prize wasn't announced.
+
+**How much this shows:** 9 of the 10 answers were right, and none was partly right. So the check confirms the judge doesn't mark good answers down, and that it caught one clear miss. It's weak evidence about the judge on wrong or borderline answers, which is where most of the A/B/C/D differences come from. A stronger check would oversample misses and the 1-point answers. Run `python eval/searchiq_eval.py agree` to recompute; it writes `results/agreement.json`, which the Track Record page reads.
 
 ## Spend
 
@@ -159,7 +169,7 @@ The OpenRouter-routed part (74 calls) cost about $0.02 of prepaid credit. Everyt
 ## Limitations
 
 - **Small n.** 10 questions per core group and 5 per business group: one answer moves a group by 10 or 20 points. Differences under about 20 points (multi-step, earnings, business trick) shouldn't be read as real.
-- **LLM judge.** One judge model with no human check yet (see above). The judge belongs to the same model family as the answerer.
+- **LLM judge.** One judge model, checked by hand on 10 answers for correctness only (10 of 10 agree, but 9 of the 10 were right answers; see above). The judge belongs to the same model family as the answerer.
 - **Temperature 0 vs 0.4.** The live app samples at 0.4, so live answers will vary more than these.
 - **One search, 3 results.** B gets exactly what the live app gets. Some B misses (earnings, multi-step) are retrieval misses, not reasoning errors.
 - **Latency isn't apples-to-apples.** B includes the Tavily round trip, and a few calls went via OpenRouter, which adds a little overhead. Use it only for "B costs ~2s more".

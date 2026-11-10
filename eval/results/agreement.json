@@ -1,0 +1,19 @@
+{
+ "per_criterion": {
+  "correctness": {
+   "agree": 10,
+   "n": 10,
+   "rate": 1.0
+  }
+ },
+ "not_scored": [
+  "groundedness",
+  "declined"
+ ],
+ "overall": 1.0,
+ "agree": 10,
+ "labels": 10,
+ "n_answers": 10,
+ "human_right": 9,
+ "disagreements": []
+}
