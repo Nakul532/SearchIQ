@@ -12,3 +12,6 @@ venv/
 __pycache__/
 tests/
 node_modules/
+
+# Eval data stays in git; the Track Record page reads public/static/track_record.json.
+eval/

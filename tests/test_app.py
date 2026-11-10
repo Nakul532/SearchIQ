@@ -403,3 +403,8 @@ def test_agent_check_normalizes_and_labels_deterministically():
     assert ok["sides"]["A"]["confidence"]["level"] == "high" and ok["disagreements"] == []
     assert agent.check_answers("q", [], {"A": "a"}, llm=lambda *a: "not json") is None
 
+
+
+def test_track_record_page_is_public():
+    r = client().get("/track-record")
+    assert r.status_code == 200 and b"Track record" in r.data and b"track_record.js" in r.data

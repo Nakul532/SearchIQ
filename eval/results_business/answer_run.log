@@ -1,0 +1,45 @@
+C1/A: 0.3s, 301 tok
+C1/B: 0.6s, 1208 tok
+C2/A: 0.2s, 280 tok
+C2/B: 0.2s, 1158 tok
+C3/A: 0.4s, 291 tok
+C3/B: 0.6s, 999 tok
+C4/A: 0.3s, 307 tok
+C4/B: 0.4s, 1180 tok
+C5/A: 0.2s, 272 tok
+C5/B: 0.4s, 1033 tok
+K1/A: 0.3s, 319 tok
+K1/B: 0.5s, 1804 tok
+K2/A: 0.3s, 301 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+K2/B: 1.0s, 1314 tok
+K3/A: 0.4s, 346 tok
+K3/B: 0.4s, 1367 tok
+K4/A: 0.3s, 324 tok
+K4/B: 0.4s, 998 tok
+K5/A: 0.3s, 277 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+K5/B: 1.0s, 1250 tok
+E1/A: 0.4s, 297 tok
+E1/B: 0.6s, 1224 tok
+E2/A: 0.3s, 398 tok
+E2/B: 6.5s, 1379 tok
+E3/A: 0.3s, 314 tok
+E3/B: 6.5s, 1089 tok
+E4/A: 0.3s, 311 tok
+E4/B: 6.4s, 1128 tok
+E5/A: 0.4s, 367 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+E5/B: 0.5s, 1534 tok
+A1/A: 0.3s, 288 tok
+A1/B: 0.3s, 1032 tok
+Daily token cap for openai/gpt-oss-20b reached (90000). Rerun tomorrow to resume.
+A2/A: 0.4s, 303 tok
+A2/B: 0.4s, 1142 tok
+A3/A: 0.6s, 495 tok
+A3/B: 0.4s, 1124 tok
+A4/A: 0.8s, 607 tok
+A4/B: 0.4s, 1210 tok
+A5/A: 0.5s, 418 tok
+A5/B: 0.6s, 1236 tok
+All 80 answers done.

@@ -1,0 +1,94 @@
+R1/A: 0.4s, 327 tok
+R1/B: 0.4s, 1144 tok
+R2/A: 0.5s, 331 tok
+R2/B: 0.4s, 1284 tok
+R3/A: 0.4s, 304 tok
+R3/B: 0.4s, 1410 tok
+R4/A: 0.3s, 302 tok
+R4/B: 0.8s, 1161 tok
+R5/A: 0.5s, 407 tok
+R5/B: 0.5s, 1024 tok
+R6/A: 0.3s, 288 tok
+R6/B: 0.4s, 1154 tok
+R7/A: 0.3s, 293 tok
+R7/B: 5.4s, 1360 tok
+R8/A: 0.3s, 298 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+R8/B: 0.5s, 1282 tok
+R9/A: 0.4s, 320 tok
+R9/B: 0.4s, 1171 tok
+R10/A: 0.4s, 319 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+R10/B: 0.4s, 1164 tok
+S1/A: 0.2s, 256 tok
+S1/B: 1.5s, 1134 tok
+S2/A: 0.2s, 280 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+S2/B: 0.5s, 1287 tok
+S3/A: 0.3s, 275 tok
+S3/B: 0.3s, 1081 tok
+S4/A: 0.2s, 266 tok
+S4/B: 0.5s, 1297 tok
+S5/A: 0.2s, 262 tok
+S5/B: 5.5s, 1048 tok
+S6/A: 0.3s, 277 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+S6/B: 0.5s, 1032 tok
+S7/A: 0.4s, 268 tok
+S7/B: 0.8s, 1297 tok
+S8/A: 0.5s, 274 tok
+S8/B: 5.3s, 1126 tok
+S9/A: 1.4s, 318 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+S9/B: 0.4s, 1345 tok
+S10/A: 0.3s, 265 tok
+S10/B: 0.4s, 1019 tok
+M1/A: 0.8s, 321 tok
+M1/B: 4.4s, 1045 tok
+M2/A: 0.3s, 341 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+M2/B: 0.7s, 1775 tok
+M3/A: 0.7s, 341 tok
+M3/B: 0.4s, 1122 tok
+M4/A: 0.3s, 316 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+M4/B: 0.4s, 1106 tok
+M5/A: 0.5s, 309 tok
+M5/B: 0.5s, 1187 tok
+M6/A: 0.3s, 309 tok
+M6/B: 0.6s, 1290 tok
+M7/A: 0.2s, 285 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+M7/B: 0.6s, 1686 tok
+M8/A: 0.2s, 290 tok
+M8/B: 0.3s, 1347 tok
+M9/A: 0.2s, 291 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+M9/B: 0.7s, 1059 tok
+M10/A: 0.4s, 416 tok
+M10/B: 0.4s, 1207 tok
+T1/A: 0.4s, 299 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+T1/B: 0.5s, 1035 tok
+T2/A: 0.3s, 298 tok
+T2/B: 0.3s, 1210 tok
+T3/A: 0.3s, 374 tok
+T3/B: 0.4s, 1441 tok
+T4/A: 0.4s, 299 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+T4/B: 0.4s, 1340 tok
+T5/A: 0.3s, 279 tok
+T5/B: 0.5s, 1067 tok
+T6/A: 0.3s, 293 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+T6/B: 0.5s, 1187 tok
+T7/A: 0.4s, 327 tok
+T7/B: 0.3s, 1238 tok
+T8/A: 0.3s, 289 tok
+T8/B: 0.3s, 1487 tok
+T9/A: 0.4s, 268 tok
+T9/B: 6.4s, 1089 tok
+T10/A: 1.5s, 306 tok
+   rate-limited on openai/gpt-oss-20b; waiting 20s
+T10/B: 0.4s, 1417 tok
+All 80 answers done.

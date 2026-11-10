@@ -1,0 +1,17 @@
+{
+ "n": 40,
+ "no_check": 0,
+ "wrong_b": 9,
+ "wrong_b_flagged": 6,
+ "right_b": 31,
+ "right_b_flagged": 7,
+ "trick": 10,
+ "trick_premise_flagged": 9,
+ "nontrick": 30,
+ "nontrick_premise_flagged": 0,
+ "levels": {
+  "high": 27,
+  "none": 3,
+  "low": 10
+ }
+}

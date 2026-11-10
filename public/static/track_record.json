@@ -1,0 +1,928 @@
+{
+ "generated_at": "2026-11-10T06:56:29+00:00",
+ "run_dates": "2026-11-10 (UTC)",
+ "arms": {
+  "A": "Model alone (no search)",
+  "B": "SearchIQ: search + cited answer",
+  "C": "SearchIQ v2: B + claim check"
+ },
+ "models": {
+  "answers": "GPT-OSS 20B (temperature 0)",
+  "judge": "GPT-OSS 120B",
+  "host": "Groq"
+ },
+ "locked": [
+  {
+   "what": "General set + rubric",
+   "commit": "b4f6182"
+  },
+  {
+   "what": "Business set",
+   "commit": "dac4e28"
+  },
+  {
+   "what": "Arm C definition",
+   "commit": "e8736d8"
+  }
+ ],
+ "links": {
+  "method": "https://github.com/Nakul532/SearchIQ/blob/main/eval/README.md",
+  "raw": "https://github.com/Nakul532/SearchIQ/tree/main/eval",
+  "rubric": "https://github.com/Nakul532/SearchIQ/blob/main/eval/rubric.md"
+ },
+ "agreement": null,
+ "sets": [
+  {
+   "key": "business",
+   "label": "Business research set",
+   "blurb": "20 analyst-style questions on companies, markets, earnings and acquisitions. Trick and † post-cutoff questions overlap those groups. Graded on required elements only.",
+   "n_questions": 20,
+   "arms": [
+    "A",
+    "B",
+    "C"
+   ],
+   "groups": [
+    {
+     "key": "companies",
+     "name": "Companies",
+     "arms": {
+      "A": {
+       "n": 5,
+       "correct_pct": 90.0,
+       "fully_correct": 4,
+       "grounded_pct": 90.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        5
+       ],
+       "latency_med": 0.27,
+       "cost_mean": 3.248e-05
+      },
+      "B": {
+       "n": 5,
+       "correct_pct": 100.0,
+       "fully_correct": 5,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        5
+       ],
+       "latency_med": 1.892,
+       "cost_mean": 9.562e-05
+      },
+      "C": {
+       "n": 5,
+       "correct_pct": 100.0,
+       "fully_correct": 5,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        5
+       ],
+       "latency_med": 2.839,
+       "cost_mean": 0.00023427999999999999
+      }
+     }
+    },
+    {
+     "key": "markets",
+     "name": "Markets",
+     "arms": {
+      "A": {
+       "n": 5,
+       "correct_pct": 40.0,
+       "fully_correct": 2,
+       "grounded_pct": 40.0,
+       "trick_pass": [
+        1,
+        1
+       ],
+       "unneeded_refusals": [
+        0,
+        4
+       ],
+       "latency_med": 0.292,
+       "cost_mean": 3.798e-05
+      },
+      "B": {
+       "n": 5,
+       "correct_pct": 80.0,
+       "fully_correct": 4,
+       "grounded_pct": 90.0,
+       "trick_pass": [
+        1,
+        1
+       ],
+       "unneeded_refusals": [
+        0,
+        4
+       ],
+       "latency_med": 2.469,
+       "cost_mean": 0.00012252
+      },
+      "C": {
+       "n": 5,
+       "correct_pct": 80.0,
+       "fully_correct": 4,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        1,
+        1
+       ],
+       "unneeded_refusals": [
+        0,
+        4
+       ],
+       "latency_med": 3.235,
+       "cost_mean": 0.00029586
+      }
+     }
+    },
+    {
+     "key": "earnings",
+     "name": "Earnings",
+     "arms": {
+      "A": {
+       "n": 5,
+       "correct_pct": 40.0,
+       "fully_correct": 2,
+       "grounded_pct": 40.0,
+       "trick_pass": [
+        0,
+        1
+       ],
+       "unneeded_refusals": [
+        1,
+        4
+       ],
+       "latency_med": 0.341,
+       "cost_mean": 4.632e-05
+      },
+      "B": {
+       "n": 5,
+       "correct_pct": 60.0,
+       "fully_correct": 3,
+       "grounded_pct": 80.0,
+       "trick_pass": [
+        0,
+        1
+       ],
+       "unneeded_refusals": [
+        0,
+        4
+       ],
+       "latency_med": 7.915,
+       "cost_mean": 0.0001128
+      },
+      "C": {
+       "n": 5,
+       "correct_pct": 60.0,
+       "fully_correct": 3,
+       "grounded_pct": 70.0,
+       "trick_pass": [
+        0,
+        1
+       ],
+       "unneeded_refusals": [
+        0,
+        4
+       ],
+       "latency_med": 8.594,
+       "cost_mean": 0.00025898
+      }
+     }
+    },
+    {
+     "key": "acquisitions",
+     "name": "Acquisitions",
+     "arms": {
+      "A": {
+       "n": 5,
+       "correct_pct": 0.0,
+       "fully_correct": 0,
+       "grounded_pct": 0.0,
+       "trick_pass": [
+        0,
+        1
+       ],
+       "unneeded_refusals": [
+        0,
+        4
+       ],
+       "latency_med": 0.528,
+       "cost_mean": 7.138e-05
+      },
+      "B": {
+       "n": 5,
+       "correct_pct": 100.0,
+       "fully_correct": 5,
+       "grounded_pct": 90.0,
+       "trick_pass": [
+        0,
+        1
+       ],
+       "unneeded_refusals": [
+        0,
+        4
+       ],
+       "latency_med": 2.724,
+       "cost_mean": 0.00010116
+      },
+      "C": {
+       "n": 5,
+       "correct_pct": 100.0,
+       "fully_correct": 5,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        1
+       ],
+       "unneeded_refusals": [
+        0,
+        4
+       ],
+       "latency_med": 3.42,
+       "cost_mean": 0.0002668
+      }
+     }
+    },
+    {
+     "key": "trick",
+     "name": "Trick questions",
+     "arms": {
+      "A": {
+       "n": 3,
+       "correct_pct": 66.66666666666667,
+       "fully_correct": 2,
+       "grounded_pct": 66.66666666666667,
+       "trick_pass": [
+        1,
+        3
+       ],
+       "unneeded_refusals": [
+        0,
+        0
+       ],
+       "latency_med": 0.379,
+       "cost_mean": 5.1e-05
+      },
+      "B": {
+       "n": 3,
+       "correct_pct": 66.66666666666667,
+       "fully_correct": 2,
+       "grounded_pct": 83.33333333333333,
+       "trick_pass": [
+        1,
+        3
+       ],
+       "unneeded_refusals": [
+        0,
+        0
+       ],
+       "latency_med": 2.296,
+       "cost_mean": 0.0001241
+      },
+      "C": {
+       "n": 3,
+       "correct_pct": 66.66666666666667,
+       "fully_correct": 2,
+       "grounded_pct": 83.33333333333333,
+       "trick_pass": [
+        1,
+        3
+       ],
+       "unneeded_refusals": [
+        0,
+        0
+       ],
+       "latency_med": 3.503,
+       "cost_mean": 0.0003043333333333333
+      }
+     }
+    },
+    {
+     "key": "postcutoff",
+     "name": "† After the model's cutoff",
+     "arms": {
+      "A": {
+       "n": 5,
+       "correct_pct": 0.0,
+       "fully_correct": 0,
+       "grounded_pct": 0.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        1,
+        5
+       ],
+       "latency_med": 0.405,
+       "cost_mean": 7.054e-05
+      },
+      "B": {
+       "n": 5,
+       "correct_pct": 100.0,
+       "fully_correct": 5,
+       "grounded_pct": 90.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        5
+       ],
+       "latency_med": 2.724,
+       "cost_mean": 0.0001044
+      },
+      "C": {
+       "n": 5,
+       "correct_pct": 100.0,
+       "fully_correct": 5,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        5
+       ],
+       "latency_med": 3.42,
+       "cost_mean": 0.00025116
+      }
+     }
+    }
+   ],
+   "overall": {
+    "key": "all",
+    "name": "Overall",
+    "arms": {
+     "A": {
+      "n": 20,
+      "correct_pct": 42.5,
+      "fully_correct": 8,
+      "grounded_pct": 42.5,
+      "trick_pass": [
+       1,
+       3
+      ],
+      "unneeded_refusals": [
+       1,
+       17
+      ],
+      "latency_med": 0.323,
+      "cost_mean": 4.704e-05
+     },
+     "B": {
+      "n": 20,
+      "correct_pct": 85.0,
+      "fully_correct": 17,
+      "grounded_pct": 90.0,
+      "trick_pass": [
+       1,
+       3
+      ],
+      "unneeded_refusals": [
+       0,
+       17
+      ],
+      "latency_med": 2.4749999999999996,
+      "cost_mean": 0.000108025
+     },
+     "C": {
+      "n": 20,
+      "correct_pct": 85.0,
+      "fully_correct": 17,
+      "grounded_pct": 92.5,
+      "trick_pass": [
+       1,
+       3
+      ],
+      "unneeded_refusals": [
+       0,
+       17
+      ],
+      "latency_med": 3.2775,
+      "cost_mean": 0.00026398
+     }
+    }
+   },
+   "misses": [
+    {
+     "id": "K2",
+     "group": "Markets",
+     "question": "According to IDC, roughly how many smartphones were shipped worldwide in 2023?",
+     "scores": {
+      "A": 0,
+      "B": 0,
+      "C": 0
+     },
+     "why": "The answer gives the Q2 2023 shipment figure (265 million) instead of the required total 2023 shipments (~1.17 billion), so it is incorrect, though the cited claim is accurately supported.",
+     "check": {
+      "level": "low",
+      "premise_flagged": true
+     }
+    },
+    {
+     "id": "E4",
+     "group": "Earnings",
+     "question": "How many vehicles did Tesla deliver in 2023?",
+     "scores": {
+      "A": 0,
+      "B": 0,
+      "C": 0
+     },
+     "why": "The answer gives 1,845,985 deliveries, which is incorrect (the correct 2023 delivery figure is 1,808,581) and the cited source lists that number as production, not deliveries.",
+     "check": {
+      "level": "high",
+      "premise_flagged": false
+     }
+    },
+    {
+     "id": "E5",
+     "group": "Earnings",
+     "question": "What was Microsoft's revenue in the fifth quarter of fiscal 2025?",
+     "scores": {
+      "A": 2,
+      "B": 0,
+      "C": 0
+     },
+     "why": "The answer does not state that a fiscal year has only four quarters, thus missing the required correction of the premise, resulting in a correctness score of 0. Its claim that no source provides a fifth‑quarter figure is accurate given the provided snippets, so groundedness is 2. It does not decline to answer.",
+     "check": {
+      "level": "none",
+      "premise_flagged": false
+     }
+    }
+   ],
+   "checker": {
+    "n": 20,
+    "no_check": 0,
+    "wrong_b": 3,
+    "wrong_b_flagged": 2,
+    "right_b": 17,
+    "right_b_flagged": 2,
+    "trick": 3,
+    "trick_premise_flagged": 1,
+    "nontrick": 17,
+    "nontrick_premise_flagged": 1,
+    "levels": {
+     "high": 16,
+     "low": 3,
+     "none": 1
+    }
+   }
+  },
+  {
+   "key": "core",
+   "label": "General set",
+   "blurb": "40 questions: recent events, stable facts (the control: search shouldn't help), multi-step and trick/unanswerable questions.",
+   "n_questions": 40,
+   "arms": [
+    "A",
+    "B",
+    "C"
+   ],
+   "groups": [
+    {
+     "key": "recent",
+     "name": "Recent events",
+     "arms": {
+      "A": {
+       "n": 10,
+       "correct_pct": 0.0,
+       "fully_correct": 0,
+       "grounded_pct": 50.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        9,
+        10
+       ],
+       "latency_med": 0.3655,
+       "cost_mean": 4.0549999999999996e-05
+      },
+      "B": {
+       "n": 10,
+       "correct_pct": 95.0,
+       "fully_correct": 9,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        10
+       ],
+       "latency_med": 2.2285,
+       "cost_mean": 0.00010507
+      },
+      "C": {
+       "n": 10,
+       "correct_pct": 95.0,
+       "fully_correct": 9,
+       "grounded_pct": 100.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        10
+       ],
+       "latency_med": 2.9505,
+       "cost_mean": 0.00027247
+      }
+     }
+    },
+    {
+     "key": "stable",
+     "name": "Stable facts (control)",
+     "arms": {
+      "A": {
+       "n": 10,
+       "correct_pct": 95.0,
+       "fully_correct": 9,
+       "grounded_pct": 95.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        10
+       ],
+       "latency_med": 0.2895,
+       "cost_mean": 2.759e-05
+      },
+      "B": {
+       "n": 10,
+       "correct_pct": 95.0,
+       "fully_correct": 9,
+       "grounded_pct": 95.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        10
+       ],
+       "latency_med": 2.2060000000000004,
+       "cost_mean": 0.00010049
+      },
+      "C": {
+       "n": 10,
+       "correct_pct": 95.0,
+       "fully_correct": 9,
+       "grounded_pct": 95.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        0,
+        10
+       ],
+       "latency_med": 3.2815000000000003,
+       "cost_mean": 0.00025675
+      }
+     }
+    },
+    {
+     "key": "multistep",
+     "name": "Multi-step",
+     "arms": {
+      "A": {
+       "n": 10,
+       "correct_pct": 60.0,
+       "fully_correct": 6,
+       "grounded_pct": 90.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        3,
+        10
+       ],
+       "latency_med": 0.3255,
+       "cost_mean": 4.039e-05
+      },
+      "B": {
+       "n": 10,
+       "correct_pct": 70.0,
+       "fully_correct": 7,
+       "grounded_pct": 80.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        3,
+        10
+       ],
+       "latency_med": 2.2335000000000003,
+       "cost_mean": 0.00011343
+      },
+      "C": {
+       "n": 10,
+       "correct_pct": 70.0,
+       "fully_correct": 7,
+       "grounded_pct": 75.0,
+       "trick_pass": [
+        0,
+        0
+       ],
+       "unneeded_refusals": [
+        3,
+        10
+       ],
+       "latency_med": 3.1705,
+       "cost_mean": 0.00026617
+      }
+     }
+    },
+    {
+     "key": "trick",
+     "name": "Trick questions",
+     "arms": {
+      "A": {
+       "n": 10,
+       "correct_pct": 80.0,
+       "fully_correct": 8,
+       "grounded_pct": 75.0,
+       "trick_pass": [
+        3,
+        10
+       ],
+       "unneeded_refusals": [
+        0,
+        0
+       ],
+       "latency_med": 0.3435,
+       "cost_mean": 3.585e-05
+      },
+      "B": {
+       "n": 10,
+       "correct_pct": 60.0,
+       "fully_correct": 6,
+       "grounded_pct": 80.0,
+       "trick_pass": [
+        3,
+        10
+       ],
+       "unneeded_refusals": [
+        0,
+        0
+       ],
+       "latency_med": 1.9175,
+       "cost_mean": 0.00010725
+      },
+      "C": {
+       "n": 10,
+       "correct_pct": 60.0,
+       "fully_correct": 6,
+       "grounded_pct": 60.0,
+       "trick_pass": [
+        3,
+        10
+       ],
+       "unneeded_refusals": [
+        0,
+        0
+       ],
+       "latency_med": 2.5860000000000003,
+       "cost_mean": 0.00026398000000000003
+      }
+     }
+    }
+   ],
+   "overall": {
+    "key": "all",
+    "name": "Overall",
+    "arms": {
+     "A": {
+      "n": 40,
+      "correct_pct": 58.75,
+      "fully_correct": 23,
+      "grounded_pct": 77.5,
+      "trick_pass": [
+       3,
+       10
+      ],
+      "unneeded_refusals": [
+       12,
+       30
+      ],
+      "latency_med": 0.328,
+      "cost_mean": 3.6095e-05
+     },
+     "B": {
+      "n": 40,
+      "correct_pct": 80.0,
+      "fully_correct": 31,
+      "grounded_pct": 88.75,
+      "trick_pass": [
+       3,
+       10
+      ],
+      "unneeded_refusals": [
+       3,
+       30
+      ],
+      "latency_med": 2.1615,
+      "cost_mean": 0.00010656
+     },
+     "C": {
+      "n": 40,
+      "correct_pct": 80.0,
+      "fully_correct": 31,
+      "grounded_pct": 82.5,
+      "trick_pass": [
+       3,
+       10
+      ],
+      "unneeded_refusals": [
+       3,
+       30
+      ],
+      "latency_med": 2.942,
+      "cost_mean": 0.0002648425
+     }
+    }
+   },
+   "misses": [
+    {
+     "id": "R3",
+     "group": "Recent events",
+     "question": "Which country won the Eurovision Song Contest 2025, and with what song?",
+     "scores": {
+      "A": 0,
+      "B": 1,
+      "C": 1
+     },
+     "why": "The answer correctly identifies Austria and the song \"Wasted Love\" and cites sources, but omits the performer JJ, so it receives partial credit.",
+     "check": {
+      "level": "high",
+      "premise_flagged": false
+     }
+    },
+    {
+     "id": "S9",
+     "group": "Stable facts (control)",
+     "question": "How tall is Mount Everest according to the 2020 China–Nepal survey?",
+     "scores": {
+      "A": 1,
+      "B": 1,
+      "C": 1
+     },
+     "why": "Provides the correct height but incorrectly calls it a China–India survey, a claim not supported by the cited sources.",
+     "check": {
+      "level": "high",
+      "premise_flagged": false
+     }
+    },
+    {
+     "id": "M2",
+     "group": "Multi-step",
+     "question": "By how many points did Lando Norris finish ahead of Max Verstappen in the final 2025 Formula One drivers' standings?",
+     "scores": {
+      "A": 0,
+      "B": 0,
+      "C": 0
+     },
+     "why": "The answer does not state the correct 2‑point difference and incorrectly claims the sources lack the needed information.",
+     "check": {
+      "level": "none",
+      "premise_flagged": false
+     }
+    },
+    {
+     "id": "M3",
+     "group": "Multi-step",
+     "question": "Who was President of the United States when the Eiffel Tower opened in 1889?",
+     "scores": {
+      "A": 2,
+      "B": 0,
+      "C": 0
+     },
+     "why": "The answer refuses to provide the required name, which is incorrect, but its claim that the sources lack the president information is accurate.",
+     "check": {
+      "level": "none",
+      "premise_flagged": false
+     }
+    },
+    {
+     "id": "M9",
+     "group": "Multi-step",
+     "question": "In what year was the university that Mark Zuckerberg dropped out of founded?",
+     "scores": {
+      "A": 2,
+      "B": 0,
+      "C": 0
+     },
+     "why": "The answer fails to state the required year (1636), making it incorrect; its statement that the snippets lack the founding year is accurate, so groundedness is high; it effectively declines to provide the answer.",
+     "check": {
+      "level": "high",
+      "premise_flagged": false
+     }
+    },
+    {
+     "id": "T1",
+     "group": "Trick questions",
+     "question": "Who won the 2030 FIFA World Cup?",
+     "scores": {
+      "A": 2,
+      "B": 0,
+      "C": 0
+     },
+     "why": "The answer incorrectly states a winner for a future tournament that hasn't occurred, which is wrong per the answer key, though it cites a source that supports the false claim.",
+     "check": {
+      "level": "low",
+      "premise_flagged": true
+     }
+    },
+    {
+     "id": "T2",
+     "group": "Trick questions",
+     "question": "In what year did Albert Einstein win his second Nobel Prize?",
+     "scores": {
+      "A": 2,
+      "B": 0,
+      "C": 0
+     },
+     "why": "The answer incorrectly asserts Einstein won a second Nobel Prize in 1922 instead of correcting the premise that he only won one, and the cited sources do not support a second prize.",
+     "check": {
+      "level": "low",
+      "premise_flagged": true
+     }
+    },
+    {
+     "id": "T3",
+     "group": "Trick questions",
+     "question": "What was the final score of Super Bowl LIX between the Philadelphia Eagles and the New England Patriots?",
+     "scores": {
+      "A": 0,
+      "B": 0,
+      "C": 0
+     },
+     "why": "The answer fails to correct the false premise or provide the correct score, making it incorrect, but its statement that the sources do not contain the final score is true, and it effectively declines to answer.",
+     "check": {
+      "level": "low",
+      "premise_flagged": true
+     }
+    },
+    {
+     "id": "T10",
+     "group": "Trick questions",
+     "question": "What was the name of the 51st US state to be admitted to the Union?",
+     "scores": {
+      "A": 0,
+      "B": 0,
+      "C": 0
+     },
+     "why": "The answer incorrectly asserts Hawaii was the 51st state, whereas there are only 50 states; the citation only supports the admission date, not the claim of being the 51st.",
+     "check": {
+      "level": "low",
+      "premise_flagged": true
+     }
+    }
+   ],
+   "checker": {
+    "n": 40,
+    "no_check": 0,
+    "wrong_b": 9,
+    "wrong_b_flagged": 6,
+    "right_b": 31,
+    "right_b_flagged": 7,
+    "trick": 10,
+    "trick_premise_flagged": 9,
+    "nontrick": 30,
+    "nontrick_premise_flagged": 0,
+    "levels": {
+     "high": 27,
+     "none": 3,
+     "low": 10
+    }
+   }
+  }
+ ]
+}
