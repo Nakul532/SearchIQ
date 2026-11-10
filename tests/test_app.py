@@ -314,20 +314,17 @@ def test_time_sensitive_queries_skip_the_cache():
 
 def test_examples_served_from_cache_even_when_capped():
     c = client("9.9.9.9")
-    ex_ci = "How does compound interest work?"
-    ask(c, ex_ci, conv="e1")
-    ask(c, "best tools", conv="e2")              # clarify flow is cached too
-    ask(c, "What is the capital of Australia?", conv="e3")
-    ask(c, "Explain how compasses find north", conv="e0")  # 3rd live search (clarify is free)
+    nvidia, apple, msft = limits.EXAMPLE_QUERIES
+    for i, q in enumerate(limits.EXAMPLE_QUERIES):   # first asks are live: 3 searches
+        assert not limits.is_time_sensitive(q), q
+        assert ask(c, q, conv=f"e{i}")[0]["cached"] is False
     assert types(ask(c, "Explain how magnets work", conv="x")) == ["limit"]  # capped now
     card = ask(c, "Explain how magnets work", conv="y")[0]
     assert {e["query"] for e in card["examples"]} == set(limits.EXAMPLE_QUERIES)
-    ci = ask(c, ex_ci, conv="e4")
-    assert ci[0]["type"] == "meta" and ci[0]["cached"] is True
-    clar = ask(c, "best tools", conv="e5")
-    assert clar[0]["type"] == "clarify" and clar[0]["cached"] is True
-    cap = ask(c, "what is the capital of australia", conv="e6")
-    assert cap[0]["cached"] is True
+    for i, q in enumerate((nvidia, apple.upper(), msft + "  ")):  # served cached while capped
+        ev = ask(c, q, conv=f"again{i}")
+        assert ev[0]["type"] == "meta" and ev[0]["cached"] is True, q
+        assert "comparison" in types(ev)
 
 
 def test_history_and_reset_are_per_guest():

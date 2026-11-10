@@ -1,6 +1,8 @@
 # SearchIQ
 
-Self-improving AI search. Every query gets **two answers (A/B)**. You pick the better one and say why, and SearchIQ turns that into lessons, rewards and a learned per-user policy. It tracks a North Star metric, **Task Completion Rate**.
+**Sourced answers for business and competitive research.** SearchIQ is for analysts researching companies, markets, earnings and deals. Every answer is grounded in live web search and cites its sources inline. That shows you which facts are backed and safe to put in front of executives, and which to double-check before they go into a brief.
+
+Every query gets **two drafts (A/B)**: one concise, one detailed. Pick the better one and say why. SearchIQ turns that into lessons, rewards and a learned per-user policy, so answers drift toward how you like your briefs. It tracks a North Star metric, **Task Completion Rate**.
 
 It runs at **$0** on free tiers:
 
@@ -15,7 +17,7 @@ It runs at **$0** on free tiers:
 
 ## How a query flows
 
-1. **Cache.** The first turn of a conversation is served from the answer cache if possible. That's free and doesn't count against any cap, and the UI shows "Cached answer from <date>". Time-sensitive queries (today, latest, current, news, prices, …) skip the cache. The three example questions ("What is the capital of Australia?", "How does compound interest work?", "best tools") are pinned in the cache, so they're always served cached.
+1. **Cache.** The first turn of a conversation is served from the answer cache if possible. That's free and doesn't count against any cap, and the UI shows "Cached answer from <date>". Time-sensitive queries (today, latest, current, news, prices, …) skip the cache. The three example questions ("Who founded Nvidia, and in what year?", "What was Apple's total net sales in fiscal year 2023?", "When did Microsoft complete its acquisition of Activision Blizzard?") are pinned in the cache, so they're always served cached.
 2. **Clarify.** A vague query ("best tools") gets one clarifying question. No search is spent.
 3. **Caps.** Guests get 3 live searches/day per cookie, plus a cap of 10/day per hashed IP, so clearing cookies doesn't reset it. Signed-in users get 10/day. There's also a site-wide daily/monthly cap and a per-model Groq token budget. Any limit, including a real 429 from Groq or Tavily, shows a friendly limit card with the demo video and cached examples. It's never an error page.
 4. **Live.** One Tavily search runs, then Groq drafts A (concise) and B (detailed) in parallel from the same results. Simple/medium queries use GPT-OSS 20B. Complex queries split A = GPT-OSS 20B, B = GPT-OSS 120B.
