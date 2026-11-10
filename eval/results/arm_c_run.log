@@ -1,0 +1,41 @@
+R1/C: high, 1509 tok
+R2/C: high, 1599 tok
+R3/C: high, 1741 tok
+R4/C: high, 1445 tok
+R5/C: high, 1318 tok
+R6/C: high, 1528 tok
+R7/C: high, 1686 tok
+R8/C: high, 1581 tok
+R9/C: high, 1497 tok
+R10/C: high, 1913 tok
+S1/C: high, 1378 tok
+S2/C: high, 1647 tok
+S3/C: high, 1342 tok
+S4/C: high, 1818 tok
+S5/C: high, 1328 tok
+S6/C: high, 1306 tok
+S7/C: high, 1781 tok
+S8/C: high, 1420 tok
+S9/C: high, 1651 tok
+S10/C: high, 1436 tok
+M1/C: high, 1320 tok
+M2/C: none, 1946 tok
+M3/C: none, 1329 tok
+M4/C: high, 1530 tok
+M5/C: high, 1478 tok
+M6/C: low, 1547 tok
+M7/C: high, 1986 tok
+M8/C: high, 1632 tok
+M9/C: high, 1378 tok
+M10/C: high, 1495 tok
+T1/C: low · premise flagged, 1357 tok
+T2/C: low · premise flagged, 1513 tok
+T3/C: low · premise flagged, 1662 tok
+T4/C: low · premise flagged, 1822 tok
+T5/C: low · premise flagged, 1347 tok
+T6/C: low · premise flagged, 1491 tok
+T7/C: low · premise flagged, 1464 tok
+T8/C: none, 1735 tok
+T9/C: low · premise flagged, 1474 tok
+T10/C: low · premise flagged, 1842 tok
+Arm C done.

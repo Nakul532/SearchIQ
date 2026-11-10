@@ -1,0 +1,21 @@
+C1/C: high, 1521 tok
+C2/C: high, 1436 tok
+C3/C: high, 1285 tok
+C4/C: high, 1443 tok
+C5/C: high, 1366 tok
+K1/C: high, 2102 tok
+K2/C: low · premise flagged, 1558 tok
+K3/C: high, 1690 tok
+K4/C: high, 1268 tok
+K5/C: low, 1752 tok
+E1/C: high, 1504 tok
+E2/C: high, 1654 tok
+E3/C: high, 1383 tok
+E4/C: high, 1413 tok
+E5/C: none, 1704 tok
+A1/C: high, 1596 tok
+A2/C: high, 1421 tok
+A3/C: high, 1442 tok
+A4/C: high, 1523 tok
+A5/C: low · premise flagged, 1612 tok
+Arm C done.

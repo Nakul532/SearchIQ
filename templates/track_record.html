@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SearchIQ Track Record</title>
+  <meta name="description" content="How often SearchIQ's answers match a locked answer key, by question type, including where it fails." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='track_record.css') }}" />
+</head>
+<body class="tr-body">
+  <div class="bg-orbs" aria-hidden="true"></div>
+  <main class="tr">
+    <a class="tr-back" href="/">← Back to SearchIQ</a>
+    <header class="tr-head">
+      <h1>Track record</h1>
+      <p class="tr-lede">How often SearchIQ's answers match an answer key that was written and committed <b>before</b> any answer ran. Every miss is listed below, including the ones where search made things worse.</p>
+    </header>
+    <section id="tr-summary" class="tr-cards" aria-live="polite"><div class="tr-loading">Loading results…</div></section>
+    <section id="tr-sets"></section>
+    <section class="tr-panel" id="tr-method"></section>
+  </main>
+  <script src="{{ url_for('static', filename='track_record.js') }}"></script>
+</body>
+</html>

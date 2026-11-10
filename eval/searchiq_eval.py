@@ -419,6 +419,8 @@ def cmd_agree() -> None:
         print(f"Fill in the three 'your_*' columns in {HUMAN} first.")
         return
     print(json.dumps({k: v for k, v in a.items() if k != "rows"}, indent=1))
+    with open(os.path.join(RESULTS, "agreement.json"), "w") as f:  # read by the Track Record page
+        json.dump({k: v for k, v in a.items() if k != "rows"}, f, indent=1)
 
 
 # --------------------------------------------------------------------------- #

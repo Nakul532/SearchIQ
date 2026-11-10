@@ -2,7 +2,9 @@
 
 **Headline:** Retrieval is what makes SearchIQ useful for anything recent. On recent events it lifts correctness from 0% to 95%, and on post-cutoff business facts from 0% to 100%. It does nothing for stable facts (95% → 95%, the control), and it made trick questions worse: 80% → 60% handled correctly, because search results drew the model into accepting false premises.
 
-This is the **baseline**: SearchIQ v2 wording, before any agent features (claim checking, confidence labels, disagreement view, steps panel). Later arms are scored against these numbers.
+**Arm C (the v2 claim check)** leaves correctness unchanged: 80% core and 85% business, the same as B. That's by design, because it doesn't rewrite the answer. What it does is flag the risky answers. Across both sets it marked 8 of the 12 answers B got wrong (confidence below High or a premise warning), and it raised a premise warning on 9 of 10 core trick questions. The cost: it also flagged 9 of 48 answers B got right, and the judge didn't give credit for the warnings (trick correctness stays 60%). See [Arm C](#arm-c-searchiq-v2-claim-check).
+
+A and B are the **baseline**: SearchIQ v2 wording, before any agent features. Arm C adds the v2 claim check ([arm_c.md](arm_c.md), locked in `e8736d8` before it ran).
 
 ## Method
 
@@ -67,6 +69,35 @@ Correctness % = the sum of scores ÷ (2 × n). "Fully correct" = the number of a
 - **Business: acquisitions and † post-cutoff:** A scored 0% on both. It had no knowledge of deals after its training cutoff, and still answered instead of saying so. B got 5/5 on each.
 - **Business trick (n = 3):** tied at 2/3. B fixed A5 (a deal that never closed) but fell for E5 (a "fifth fiscal quarter").
 
+## Arm C: SearchIQ v2 claim check
+
+Arm C is B's answer, unchanged, plus the check note a v2 user sees under it (confidence, per-claim labels, premise warning). It's graded by the same locked judge. The check runs `agent.check_answers()` as deployed, with GPT-OSS 20B at temperature 0. The disagreement view isn't evaluated, because eval arm A has no retrieval, unlike the live app's A.
+
+| Set | Arm | Correct | Fully correct | Grounded | Median latency |
+|---|---|---|---|---|---|
+| Core (40) | B | 80.0% | 31/40 | 88.8% | 2.16s |
+| | C | 80.0% | 31/40 | 82.5% | 2.94s |
+| Core trick (10) | B | 60% | 6/10 | 80% | 1.92s |
+| | C | 60% | 6/10 | 60% | 2.59s |
+| Business (20) | B | 85.0% | 17/20 | 90.0% | 2.47s |
+| | C | 85.0% | 17/20 | 92.5% | 3.28s |
+
+Every other group matches B on correctness. Groundedness moved on 7 answers, both ways (M6, T3, T5, T10 down; A4, K5 up; E5 down), even though B's text is identical. That's roughly the size of judge noise from a longer input. On T10 the judge noted the premise warning and still scored 0, because the answer text itself names a 51st state.
+
+**Checker diagnostics** (exploratory, not in the locked rubric; "flagged" = confidence below High, or a premise warning):
+
+| | Core | Business | Both |
+|---|---|---|---|
+| Wrong B answers it flagged (catch rate) | 6/9 | 2/3 | **8/12** |
+| Right B answers it flagged anyway (false alarms) | 7/31 | 2/17 | **9/48** |
+| Premise warning on trick questions | 9/10 | 1/3 | 10/13 |
+| Premise warning on other questions | 0/30 | 1/17 | 1/47 |
+
+**Per-group read:**
+- **Trick:** the check spots false premises well (9 of 10 core trick questions), but it doesn't fix the answer. A user who reads the warning is protected; the text below it still accepts the premise. The next step is to have the warning rewrite or withhold the answer, then re-run this arm.
+- **What it misses:** 4 of the 12 wrong answers were labelled High confidence. Two were incomplete rather than false (R3 omits the performer; M9 omits the founding year), and a claim check can't see a missing element. In S9 a wrong side detail wasn't extracted as a claim. In E4 the Tesla delivery figure matched a source carrying the wrong number.
+- **Cost:** about +0.8s and ~1.8K tokens per answer on GPT-OSS 20B.
+
 ## Judge agreement
 
 **Pending your hand scores.** [results/human_scores.csv](results/human_scores.csv) holds 10 answers drawn with `random.Random(42)`, without the judge's scores. Fill in the three `your_*` columns, then run `python eval/searchiq_eval.py agree`. Until then, the judge's scores are unverified.
@@ -87,6 +118,7 @@ The OpenRouter-routed part (74 calls) cost about $0.02 of prepaid credit. Everyt
 - **Temperature 0 vs 0.4.** The live app samples at 0.4, so live answers will vary more than these.
 - **One search, 3 results.** B gets exactly what the live app gets. Some B misses (earnings, multi-step) are retrieval misses, not reasoning errors.
 - **Latency isn't apples-to-apples.** B includes the Tavily round trip, and a few calls went via OpenRouter, which adds a little overhead. Use it only for "B costs ~2s more".
+- **Arm C reuses B's text.** It measures the check, not a different answer, so its correctness can only move through how the judge reads the warnings.
 - **Point in time.** Recent and post-cutoff answers were graded against keys written on 2026-11-09. Searches are cached in `searches.jsonl`, so reruns are reproducible, but a fresh search could differ.
 
 ## Re-running

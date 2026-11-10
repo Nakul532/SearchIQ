@@ -260,6 +260,12 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/track-record")
+def track_record():
+    """Public eval results page (data: public/static/track_record.json)."""
+    return render_template("track_record.html")
+
+
 @app.route("/api/metrics")
 def api_metrics():
     conn = db()
