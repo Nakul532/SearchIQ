@@ -1,0 +1,14 @@
+# Never upload local data, archives or secrets to Vercel.
+archive/
+*.db
+*.sql
+*.json.bak
+backup_*.json
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+tests/
+node_modules/

@@ -1,18 +1,17 @@
-"""Search Evaluation Agent.
+"""Search Evaluation Agent (SearchIQ backend).
 
-A command-line agent that:
+A search agent that:
   1. Takes a user search query.
-  2. Generates an answer with the Anthropic API (Claude).
-  3. Collects thumbs up/down feedback + an optional comment.
-  4. Persists every query, answer, and piece of feedback to a local SQLite DB.
-  5. Learns over time: queries that get bad feedback are rephrased and retried,
-     and accumulated feedback is fed back into the system prompt as "lessons".
+  2. Searches the web with Tavily, then answers with Groq-hosted models.
+  3. Collects A/B preferences and thumbs up/down feedback.
+  4. Persists every query, answer, and piece of feedback (Turso / local SQLite).
+  5. Learns over time: rejected answers are rephrased and retried, and
+     preferences become "lessons", rewards and a per-user policy.
   6. Tracks a North Star Metric: Task Completion Rate (% of queries that
      eventually earned positive feedback).
-  7. Prints a dashboard after every 5 queries.
 
-Run:
-    export ANTHROPIC_API_KEY=sk-ant-...
+Run the CLI:
+    export GROQ_API_KEY=... TAVILY_API_KEY=...
     python search_agent.py
 """
 
@@ -28,9 +27,10 @@ import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
-import anthropic
+import db
+import providers
 
-# Load a local .env (if present) so ANTHROPIC_API_KEY / DB_PATH etc. can live in
+# Load a local .env (if present) so GROQ_API_KEY / TAVILY_API_KEY etc. can live in
 # a file instead of being exported each session. Loaded here at import time —
 # app.py imports this module, so both the web app and the CLI pick it up before
 # any environment variable is read. Real environment vars take precedence over
@@ -45,98 +45,46 @@ except ModuleNotFoundError:
 # --------------------------------------------------------------------------- #
 # Model routing tiers
 #
-# Pipeline: EVERY query runs web search first (always — the retrieval layer
-# never changes). A rule-based pre-processor (classify_query) then sizes the
-# query and picks which model AGGREGATES the same search results into the answer:
-#   simple  → Haiku  (factual / definitional / single facts) — fast
-#   medium  → Haiku  (comparisons / explanations / how-does-X-work) — balanced
-#   complex → Sonnet (analysis / research / multi-step reasoning / synthesis) — deep
-# Routing simple/medium queries to Haiku avoids an expensive Sonnet call on the
-# bulk of traffic; the dashboard surfaces the model mix and the cost saved.
+# Pipeline: EVERY query runs ONE Tavily web search first (shared by answers A
+# and B). A rule-based pre-processor (classify_query) then sizes the query and
+# picks which Groq model AGGREGATES the search results into the answer:
+#   simple  → fast model (factual / definitional / single facts)
+#   medium  → fast model (comparisons / explanations / how-does-X-work)
+#   complex → deep model (analysis / research / multi-step reasoning)
+# Model ids live in providers.py (env-overridable).
 # --------------------------------------------------------------------------- #
-HAIKU_MODEL = "claude-haiku-4-5-20251001"   # fast, cheap
-SONNET_MODEL = "claude-sonnet-4-6"          # capable, for complex reasoning
+FAST_MODEL = providers.FAST_MODEL
+DEEP_MODEL = providers.DEEP_MODEL
+FAST_LABEL = providers.FAST_LABEL
+DEEP_LABEL = providers.DEEP_LABEL
 
-# Kept for the rephrase step (a small, cheap classification-style call).
-MODEL = HAIKU_MODEL
+# Kept for the rephrase step (a small rewriting call).
+MODEL = FAST_MODEL
 
 # Per-tier routing config — model, badge icon, and the one-word "mode" label.
 TIERS = {
-    "simple":  {"model": HAIKU_MODEL,  "icon": "⚡", "mode": "Fast"},
-    "medium":  {"model": HAIKU_MODEL,  "icon": "🔍", "mode": "Balanced"},
-    "complex": {"model": SONNET_MODEL, "icon": "🧠", "mode": "Deep"},
+    "simple":  {"model": FAST_MODEL, "icon": "⚡", "mode": "Fast"},
+    "medium":  {"model": FAST_MODEL, "icon": "🔍", "mode": "Balanced"},
+    "complex": {"model": DEEP_MODEL, "icon": "🧠", "mode": "Deep"},
 }
 
-# Rough per-query cost estimate, used only for the "cost saved vs always-Sonnet"
-# dashboard stat (we don't meter real tokens). Assumes a typical aggregation call
-# that includes web-search results in the prompt.
-AVG_INPUT_TOKENS = 3000
-AVG_OUTPUT_TOKENS = 800
-MODEL_PRICING = {  # USD per 1M tokens: (input, output)
-    HAIKU_MODEL: (1.0, 5.0),
-    SONNET_MODEL: (3.0, 15.0),
-}
+# Rough per-call token profile, used ONLY for the dashboard's labelled cost
+# estimate at Groq list prices (we don't meter per-interaction tokens).
+AVG_INPUT_TOKENS = 1800
+AVG_OUTPUT_TOKENS = 900
+
+
+def label_for(model: str | None) -> str:
+    return providers.model_label(model or FAST_MODEL)
 
 
 def estimate_query_cost(model: str) -> float:
-    """Estimated USD cost of one aggregation call on ``model`` (see notes above)."""
-    pin, pout = MODEL_PRICING.get(model, MODEL_PRICING[SONNET_MODEL])
+    """Estimated USD cost of one answer call on ``model`` at Groq list prices."""
+    pin, pout = providers.LIST_PRICES.get(model, providers.LIST_PRICES.get(DEEP_MODEL, (0.15, 0.6)))
     return AVG_INPUT_TOKENS / 1e6 * pin + AVG_OUTPUT_TOKENS / 1e6 * pout
 
 
-# Known persistent-volume mount points to fall back to when the env var that
-# normally points at them isn't injected. Railway mounts its volume at /data.
-_VOLUME_FALLBACKS = ("/data",)
-
-
-def _writable_dir(path: str) -> bool:
-    return bool(path) and os.path.isdir(path) and os.access(path, os.W_OK)
-
-
-def _resolve_db_path() -> tuple[str, str]:
-    """Pick where the SQLite DB lives, honoring a persistent volume if present.
-
-    Railway's filesystem is ephemeral — the DB MUST live on the attached volume
-    or it resets on every redeploy. Priority:
-      1. DB_PATH env var — explicit full path to the .db file (operator override).
-      2. RAILWAY_VOLUME_MOUNT_PATH — Railway injects this when a volume is attached;
-         the DB goes inside it (e.g. /data/search_agent.db).
-      3. A known mounted volume dir (e.g. /data) that exists and is writable — this
-         covers the case where the volume is mounted but the env var isn't injected.
-      4. Local file next to this script (ephemeral — local dev only).
-    Returns (path, source-label). The parent directory is created if needed.
-    """
-    explicit = os.environ.get("DB_PATH")
-    volume = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
-    if explicit:
-        path, source = explicit, "DB_PATH env"
-    elif volume:
-        path, source = os.path.join(volume, "search_agent.db"), "RAILWAY_VOLUME_MOUNT_PATH"
-    else:
-        mounted = next((d for d in _VOLUME_FALLBACKS if _writable_dir(d)), None)
-        if mounted:
-            path, source = os.path.join(mounted, "search_agent.db"), f"volume {mounted}"
-        else:
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "search_agent.db")
-            source = "local (ephemeral)"
-    # Ensure the directory exists. If the chosen path isn't writable (e.g. a
-    # misconfigured volume), fall back to local rather than crashing the whole app
-    # — and log loudly, since that means data won't persist.
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    except OSError as exc:
-        local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "search_agent.db")
-        print(f"[db] WARNING: cannot write to {path} ({exc}); falling back to {local} "
-              f"(EPHEMERAL — data will reset). Check the volume mount.", flush=True)
-        path, source = local, "local fallback after volume error"
-        os.makedirs(os.path.dirname(os.path.abspath(local)), exist_ok=True)
-    return path, source
-
-
-DB_PATH, _DB_SOURCE = _resolve_db_path()
-# Surfaced in Railway/gunicorn logs so you can confirm the DB is on the volume.
-# A non-"/data" path here on Railway means data WILL reset on redeploy.
-print(f"[db] SQLite path: {DB_PATH}  (source: {_DB_SOURCE})", flush=True)
+DB_PATH = db.LOCAL_DB_PATH
 MAX_RETRIES = 2          # how many rephrase-and-retry rounds per failed query
 DASHBOARD_EVERY = 5      # show the dashboard after this many queries
 LESSON_CONTEXT_LIMIT = 8 # how many recent feedback lessons to feed the model
@@ -166,22 +114,12 @@ STYLE_OF_SIDE = {"A": "concise", "B": "detailed"}
 POLICY_EVERY = 5         # re-evaluate the policy after every N reward-bearing queries
 PROFILE_EVERY = 5        # rebuild a user's personality profile after every N queries
 
-# Anthropic's built-in server-side web search tool. Runs the search on
-# Anthropic's infrastructure, feeds results into Claude's context, and returns
-# citations — the RAG retrieval layer. GA, no beta header needed.
-# allowed_callers=["direct"] disables the tool's programmatic-tool-calling
-# (dynamic-filtering) path, which Haiku 4.5 does not support — without it, a
-# Haiku request with this tool 400s. Direct calling works on every routed model.
-WEB_SEARCH_TOOL = {
-    "type": "web_search_20260209",
-    "name": "web_search",
-    # Fewer search rounds → fewer results injected into the prompt → far fewer
-    # tokens (the tool has no per-result cap), which keeps each answer fast.
-    "max_uses": 2,
-    "allowed_callers": ["direct"],
-}
+# Tavily (basic search, 1 credit) runs ONCE per live query; both A/B drafts are
+# grounded in the same results.
 MAX_SOURCES = 3          # cap how many sources we surface per answer (top 3)
-ANSWER_TIMEOUT_S = 90    # hard per-answer generation timeout (each A/B draft)
+ANSWER_TIMEOUT_S = 75    # hard per-answer generation timeout (each A/B draft)
+HISTORY_TURNS = 6        # prior turns replayed for context (kept small: free-tier TPM)
+HISTORY_CHARS = 700      # per-turn truncation for replayed history
 
 
 # --------------------------------------------------------------------------- #
@@ -248,12 +186,11 @@ def build_routing(complexity: str) -> dict:
     """Assemble a routing dict (model + UI badge) from a complexity tier.
 
     Web search is always on; the badge encodes tier, model, and mode, e.g.
-    "⚡ Simple · Haiku · Fast" / "🔍 Medium · Haiku · Balanced" /
-    "🧠 Complex · Sonnet · Deep".
+    "⚡ Simple · GPT-OSS 20B · Fast" / "🧠 Complex · GPT-OSS 120B · Deep".
     """
     tier = TIERS.get(complexity, TIERS["medium"])
     model = tier["model"]
-    model_label = "Sonnet" if model.startswith("claude-sonnet") else "Haiku"
+    model_label = label_for(model)
     badge = f"{tier['icon']} {complexity.capitalize()} · {model_label} · {tier['mode']}"
     return {
         "complexity": complexity,
@@ -270,8 +207,8 @@ def ab_routings(base_routing: dict) -> tuple[dict, dict]:
     """Per-side routing for the A/B pair.
 
     For COMPLEX queries, split the models so the user sees a good answer fast:
-    Answer A uses Haiku (fast, concise) and Answer B uses Sonnet (thorough,
-    detailed). For simpler tiers both sides keep the (policy-biased) base routing.
+    Answer A uses the fast model (concise) and Answer B the deep model
+    (thorough, detailed). For simpler tiers both sides keep the (policy-biased) base routing.
     The complex split intentionally overrides the policy's model for the A/B pair —
     that latency strategy is the whole point of the split.
     """
@@ -279,26 +216,20 @@ def ab_routings(base_routing: dict) -> tuple[dict, dict]:
         tier = TIERS["complex"]
         a = dict(base_routing)
         a.update({
-            "model": HAIKU_MODEL,
-            "model_label": "Haiku",
-            "badge": f"{tier['icon']} Complex · Haiku · {tier['mode']}",
+            "model": FAST_MODEL,
+            "model_label": FAST_LABEL,
+            "badge": f"{tier['icon']} Complex · {FAST_LABEL} · {tier['mode']}",
         })
-        a.pop("policy_biased", None)  # this side is fixed to Haiku by design
-        b = build_routing("complex")  # Sonnet
+        a.pop("policy_biased", None)  # this side is fixed to the fast model by design
+        b = build_routing("complex")  # deep model
         return a, b
     return dict(base_routing), dict(base_routing)
 
 
-def _reasoning_kwargs(model: str) -> dict:
-    """Per-model thinking/effort params.
-
-    Adaptive thinking and the effort parameter are supported on Sonnet 4.6 (and
-    Opus) but ERROR on Haiku 4.5 — so only attach them for Sonnet. Haiku runs
-    plain, which is exactly what the cheap/fast tier wants.
-    """
-    if model.startswith("claude-sonnet"):
-        return {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}}
-    return {}
+def _effort(model: str) -> str:
+    """Reasoning effort for gpt-oss models: a little more thinking on the deep
+    model, minimal on the fast one (reasoning tokens count toward free-tier TPD)."""
+    return "medium" if model == DEEP_MODEL else "low"
 
 
 # --------------------------------------------------------------------------- #
@@ -307,7 +238,7 @@ def _reasoning_kwargs(model: str) -> dict:
 # Generic "vague" terms that signal an under-specified query.
 _VAGUE_TERMS = {"best", "good", "top", "help", "recommend", "recommendation",
                 "recommendations", "tips", "advice", "ideas", "options"}
-# Category → a natural, conversational fallback question (used when the Haiku call
+# Category → a natural, conversational fallback question (used when the LLM call
 # to phrase the question is unavailable). First matching category wins.
 _CLARIFY_CATEGORIES = [
     (("tool", "tools", "software", "app", "apps", "platform", "framework",
@@ -352,13 +283,13 @@ def _clarify_category(query: str) -> tuple[bool, str | None]:
     return True, _CLARIFY_DEFAULT
 
 
-def clarifying_question(client: anthropic.Anthropic, query: str) -> str | None:
+def clarifying_question(query: str) -> str | None:
     """If the query is ambiguous, return ONE natural clarifying question to ask.
 
     The agent asks this in the chat like a person would; the user answers in their
     own words (no chips/buttons), and that reply — together with this question, both
     kept in the conversation history — gives the model the context to answer the
-    original query. The question is phrased by Haiku for a human touch and tailored
+    original query. The question is phrased by the fast model for a human touch and tailored
     to the query; on any API failure it falls back to a templated question for the
     query's category. Returns None when the query is specific enough to answer.
     """
@@ -375,15 +306,11 @@ def clarifying_question(client: anthropic.Anthropic, query: str) -> str | None:
         "Reply with ONLY the question — no preamble, no quotes, no lists."
     )
     try:
-        resp = client.messages.create(
-            model=HAIKU_MODEL,
-            max_tokens=120,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = next((b.text for b in resp.content if b.type == "text"), "").strip().strip('"').strip()
+        text = providers.chat(FAST_MODEL, [{"role": "user", "content": prompt}],
+                              max_tokens=400).strip().strip('"').strip()
         if text:
             return text
-    except anthropic.APIError:
+    except (providers.ProviderLimit, providers.ProviderError):
         pass
     return fallback
 
@@ -392,7 +319,7 @@ def sanitize_env_secret(name: str) -> str | None:
     """Strip non-ASCII chars (e.g. a pasted U+2028) and whitespace from a secret.
 
     HTTP headers must be ASCII, so a stray Unicode character in the API key
-    raises "'ascii' codec can't encode character ...". Anthropic keys are pure
+    raises "'ascii' codec can't encode character ...". API keys are pure
     ASCII, so dropping non-ASCII bytes can only remove paste artifacts, never a
     valid key character. The cleaned value is written back to the environment so
     every client (web app and CLI) uses it.
@@ -410,9 +337,16 @@ def sanitize_env_secret(name: str) -> str | None:
 # --------------------------------------------------------------------------- #
 # Storage
 # --------------------------------------------------------------------------- #
-def init_db(conn: sqlite3.Connection) -> None:
-    """Create the interactions table if it does not exist."""
-    conn.execute(
+_SCHEMA_READY: set[str] = set()
+
+
+def init_db(conn) -> None:
+    """Create every table (once per process per database; cheap no-op after)."""
+    key = db.describe()
+    if key in _SCHEMA_READY:
+        return
+    stmts: list[str] = []
+    stmts.append(
         """
         CREATE TABLE IF NOT EXISTS interactions (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -428,7 +362,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     # A/B answer comparisons — two answers per query, plus the user's preference.
-    conn.execute(
+    stmts.append(
         """
         CREATE TABLE IF NOT EXISTS comparisons (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -450,7 +384,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     # Lessons the system has learned from preferences — the visible learning loop.
-    conn.execute(
+    stmts.append(
         """
         CREATE TABLE IF NOT EXISTS lessons (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -466,7 +400,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     # Full conversation transcript — one row per user/assistant turn, linked by
     # conversation_id and scoped to a session. Powers memory + the history sidebar.
-    conn.execute(
+    stmts.append(
         """
         CREATE TABLE IF NOT EXISTS messages (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -482,7 +416,7 @@ def init_db(conn: sqlite3.Connection) -> None:
 
     # Reinforcement-learning reward log — one row per reward signal (see
     # REWARD_SCORES). Powers the Reward dashboard and the learned policy.
-    conn.execute(
+    stmts.append(
         """
         CREATE TABLE IF NOT EXISTS rewards (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -491,7 +425,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             session_id     TEXT,
             signal         TEXT    NOT NULL,   -- 'ab_winner' | 'ab_loser' | 'thumbs_up' | … | 'reason_bonus'
             score          REAL    NOT NULL,   -- the numeric reward
-            model          TEXT,               -- 'Haiku' | 'Sonnet' (which model produced the answer)
+            model          TEXT,               -- model label (which model produced the answer)
             style          TEXT,               -- 'concise' | 'detailed' | NULL (single/followup)
             query_type     TEXT,               -- 'simple' | 'medium' | 'complex'
             created_at     TEXT    NOT NULL
@@ -500,7 +434,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     # Learned policy updates — each row is one re-evaluation that picked the
     # highest-reward model+style+query_type pattern and adjusted behavior to it.
-    conn.execute(
+    stmts.append(
         """
         CREATE TABLE IF NOT EXISTS policy_updates (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -517,7 +451,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
 
     # Authenticated Google accounts — identity persists across devices for 2 weeks.
-    conn.execute(
+    stmts.append(
         """
         CREATE TABLE IF NOT EXISTS users (
             google_id       TEXT PRIMARY KEY,
@@ -530,20 +464,28 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     # Per-user personality profile, rebuilt every few queries from their own data.
-    conn.execute(
+    stmts.append(
         """
         CREATE TABLE IF NOT EXISTS user_profiles (
             google_id       TEXT PRIMARY KEY,
             expertise_level TEXT,              -- beginner | intermediate | expert
             preferred_style TEXT,              -- concise | detailed
             top_topics      TEXT,              -- JSON list of subjects
-            preferred_model TEXT,              -- Haiku | Sonnet (highest-reward)
+            preferred_model TEXT,              -- model label (highest-reward)
             summary         TEXT,              -- the system-prompt sentence
             queries_at      INTEGER,           -- # of the user's queries at build time
             updated_at      TEXT    NOT NULL
         )
         """
     )
+
+    import limits as _limits  # app guard-rail tables (counters + answer cache)
+    stmts.extend(_limits.SCHEMA)
+    if hasattr(conn, "execute_batch"):
+        conn.execute_batch([(sql, ()) for sql in stmts])
+    else:
+        for sql in stmts:
+            conn.execute(sql)
 
     # Migrations: add columns to pre-existing tables (idempotent).
     def _ensure(table: str, col: str, decl: str) -> None:
@@ -556,7 +498,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _ensure("interactions", "session_id", "TEXT")
     _ensure("comparisons", "session_id", "TEXT")
     _ensure("comparisons", "conversation_id", "TEXT")
-    # Per-side routing — A and B can use different models (Haiku A / Sonnet B on
+    # Per-side routing — A and B can use different models (fast A / deep B on
     # complex queries), so the reward system can attribute the winner to its model.
     _ensure("comparisons", "routing_a", "TEXT")
     _ensure("comparisons", "routing_b", "TEXT")
@@ -564,45 +506,13 @@ def init_db(conn: sqlite3.Connection) -> None:
     # Policy is now learned per user (scoped by the originating session_id/google_id).
     _ensure("policy_updates", "session_id", "TEXT")
     conn.commit()
+    _SCHEMA_READY.add(key)
 
 
-# The app's data tables — used by restore_from_sql to clear the DB before a
-# full import (the backup is a sqlite `.dump`, whose CREATE TABLE statements
-# would otherwise collide with init_db's tables). NOTE: `users` is deliberately
-# excluded so accounts survive a reset/restore; user_profiles is derived data
-# and regenerates, so it's included.
+# The app's per-user data tables (used by /api/reset). `users` is excluded so
+# accounts survive a reset; user_profiles is derived data and regenerates.
 DATA_TABLES = ("interactions", "comparisons", "lessons", "messages",
                "rewards", "policy_updates", "user_profiles")
-
-
-def restore_from_sql(conn: sqlite3.Connection, sql_text: str) -> dict[str, int]:
-    """Restore the database from a sqlite `.dump` script (e.g. backup.sql).
-
-    Drops the existing app tables, then replays the dump so the data matches the
-    backup exactly. Returns a row count per table after the import. Idempotent:
-    running it twice yields the same final state.
-    """
-    # Drop first so the dump's CREATE TABLE statements don't hit "table exists".
-    conn.execute("PRAGMA foreign_keys=OFF")
-    for table in DATA_TABLES:
-        conn.execute(f"DROP TABLE IF EXISTS {table}")
-    conn.commit()
-
-    # executescript() commits any pending transaction, then runs the whole dump
-    # (which wraps its INSERTs in its own BEGIN/COMMIT).
-    conn.executescript(sql_text)
-    conn.commit()
-
-    # Re-apply column migrations in case the dump predates a newer column.
-    init_db(conn)
-
-    counts: dict[str, int] = {}
-    for table in DATA_TABLES:
-        try:
-            counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        except sqlite3.OperationalError:
-            counts[table] = 0
-    return counts
 
 
 def next_query_group(conn: sqlite3.Connection) -> int:
@@ -660,6 +570,7 @@ def insert_answer(
     attempt: int,
     sources: list[dict] | None = None,
     routing: dict | None = None,
+    session_id: str | None = None,
 ) -> int:
     """Insert an answer (with its web sources) with no feedback yet; return row id.
 
@@ -669,8 +580,8 @@ def insert_answer(
         """
         INSERT INTO interactions
             (query_group, original_query, effective_query, answer,
-             feedback, comment, attempt, created_at, sources, routing)
-        VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)
+             feedback, comment, attempt, created_at, sources, routing, session_id)
+        VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
         """,
         (
             query_group,
@@ -681,6 +592,7 @@ def insert_answer(
             _dt.datetime.now().isoformat(timespec="seconds"),
             json.dumps(sources or []),
             json.dumps(routing) if routing else None,
+            session_id,
         ),
     )
     conn.commit()
@@ -975,21 +887,27 @@ def save_message(
 
 
 def conversation_history(
-    conn: sqlite3.Connection, conversation_id: str, limit: int = 10
+    conn: sqlite3.Connection, conversation_id: str, limit: int = 10,
+    session_id: str | None = None,
 ) -> list[dict]:
-    """Return the last ``limit`` turns as [{role, content}] for Claude's context.
+    """Return the last ``limit`` turns as [{role, content}] for the model's context.
 
     This is what makes follow-ups work ("tell me more about point 2"): the prior
     user/assistant turns are replayed to the model before the new question.
+    Scoped to ``session_id`` when given, so one user can't pull another's turns.
     """
-    rows = conn.execute(
-        """
-        SELECT role, content FROM messages
-        WHERE conversation_id = ?
-        ORDER BY id DESC LIMIT ?
-        """,
-        (conversation_id, limit),
-    ).fetchall()
+    if session_id is None:
+        rows = conn.execute(
+            "SELECT role, content FROM messages WHERE conversation_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (conversation_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT role, content FROM messages WHERE conversation_id = ? AND session_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (conversation_id, session_id, limit),
+        ).fetchall()
     return [{"role": r, "content": c} for (r, c) in reversed(rows)]
 
 
@@ -1192,8 +1110,7 @@ def routing_facets(routing: dict | None) -> tuple[str | None, str | None]:
         return None, None
     model = routing.get("model_label")
     if not model:
-        m = routing.get("model", "") or ""
-        model = "Sonnet" if m.startswith("claude-sonnet") else "Haiku"
+        model = label_for(routing.get("model"))
     return model, routing.get("complexity")
 
 
@@ -1325,7 +1242,7 @@ def reward_stats(conn: sqlite3.Connection, session_id: str | None = None) -> dic
         "negative_count": len(neg),
         "positive_sum": round(sum(r[1] for r in pos), 3),
         "negative_sum": round(sum(r[1] for r in neg), 3),
-        "by_model": {"Haiku": by_model.get("Haiku", 0.0), "Sonnet": by_model.get("Sonnet", 0.0)},
+        "by_model": {FAST_LABEL: by_model.get(FAST_LABEL, 0.0), DEEP_LABEL: by_model.get(DEEP_LABEL, 0.0)},
         "by_query_type": {k: by_query_type.get(k, 0.0) for k in ("simple", "medium", "complex")},
         "by_style": {k: by_style.get(k, 0.0) for k in ("concise", "detailed")},
         "timeline": timeline,
@@ -1515,12 +1432,12 @@ def apply_policy(conn: sqlite3.Connection, routing: dict, session_id: str | None
     if qt not in (None, "general", routing.get("complexity")):
         return routing
     target_label = p.get("model")
-    if target_label not in ("Haiku", "Sonnet") or routing.get("model_label") == target_label:
+    if target_label not in (FAST_LABEL, DEEP_LABEL) or routing.get("model_label") == target_label:
         return routing
     complexity = routing.get("complexity", "medium")
     tier = TIERS.get(complexity, TIERS["medium"])
     biased = dict(routing)
-    biased["model"] = SONNET_MODEL if target_label == "Sonnet" else HAIKU_MODEL
+    biased["model"] = DEEP_MODEL if target_label == DEEP_LABEL else FAST_MODEL
     biased["model_label"] = target_label
     biased["badge"] = f"{tier['icon']} {complexity.capitalize()} · {target_label} · {tier['mode']}"
     biased["policy_biased"] = True
@@ -1613,7 +1530,7 @@ def build_user_profile(conn: sqlite3.Connection, google_id: str) -> dict:
     stats = reward_stats(conn, google_id)
     by_style, by_model = stats["by_style"], stats["by_model"]
     preferred_style = "detailed" if by_style.get("detailed", 0.0) >= by_style.get("concise", 0.0) else "concise"
-    preferred_model = "Sonnet" if by_model.get("Sonnet", 0.0) >= by_model.get("Haiku", 0.0) else "Haiku"
+    preferred_model = DEEP_LABEL if by_model.get(DEEP_LABEL, 0.0) >= by_model.get(FAST_LABEL, 0.0) else FAST_LABEL
     if stats["total_events"] == 0:
         preferred_model = None  # no reward data yet — don't claim a model preference
     top_topics = profile_topics(query_texts)
@@ -1693,7 +1610,7 @@ def profile_directive(profile: dict | None) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Claude calls
+# LLM calls (Groq) grounded in Tavily search results
 # --------------------------------------------------------------------------- #
 # A/B answer styles — both web-grounded, but two distinct synthesis approaches
 # the user compares side by side.
@@ -1711,20 +1628,15 @@ STYLE_B = (
 
 def build_system_prompt(lessons: list[str], style: str | None = None) -> str:
     base = (
-        "You are a precise search-answer assistant. Given a user's search query, "
-        "produce a direct, well-structured, factual answer. "
+        "You are a precise search-answer assistant. Given a user's search query and "
+        "fresh web search results, produce a direct, well-structured, factual answer. "
         "If the query is ambiguous, answer the most likely intent and note the assumption. "
         "Respond directly without preamble like 'Here is' or 'Sure'.\n\n"
-        "GROUNDING REQUIREMENT: You have a web_search tool and you MUST use it on "
-        "every query. Always run at least one web search BEFORE writing your answer — "
-        "never answer from training memory alone, even when you are confident you "
-        "already know the answer. If a first search is thin, search again with a "
-        "better query before answering.\n\n"
-        "Read the search results carefully. Your answer MUST be based on what the "
-        "sources say, not your prior knowledge. If a source says X happened, report "
-        "X. Quote or closely paraphrase the relevant passages from the sources as you "
-        "build your answer, use your own knowledge only to add light context around "
-        "the sourced facts, and cite the sources you used."
+        "GROUNDING REQUIREMENT: Base your answer on the numbered search results you are "
+        "given, not on prior knowledge. If a source says X happened, report X. Closely "
+        "paraphrase the relevant passages, use your own knowledge only to add light "
+        "context around the sourced facts, and cite sources inline as [1], [2], [3]. "
+        "If the results don't answer the question, say so plainly."
     )
     if style:
         base += "\n\n" + style
@@ -1737,167 +1649,138 @@ def build_system_prompt(lessons: list[str], style: str | None = None) -> str:
     return base
 
 
-def extract_sources(message) -> list[dict]:
-    """Pull web sources from a response: citations first, then searched results.
-
-    Returns a deduped list of {"url", "title"} dicts (cited sources prioritized).
-    """
-    sources: list[dict] = []
-    seen: set[str] = set()
-
-    def add(url, title):
+def sources_from_results(results: list[dict]) -> list[dict]:
+    """The {url, title} list shown under an answer (top MAX_SOURCES results)."""
+    out, seen = [], set()
+    for r in results or []:
+        url = r.get("url")
         if url and url not in seen:
             seen.add(url)
-            sources.append({"url": url, "title": title or url})
-
-    # Pass 1 — sources Claude actually cited in its answer.
-    for block in message.content:
-        if getattr(block, "type", None) == "text":
-            for cit in getattr(block, "citations", None) or []:
-                add(getattr(cit, "url", None), getattr(cit, "title", None))
-
-    # Pass 2 — results returned by the search tool (fills in if citations are sparse).
-    for block in message.content:
-        if getattr(block, "type", None) == "web_search_tool_result":
-            content = getattr(block, "content", None) or []
-            if isinstance(content, list):
-                for r in content:
-                    add(getattr(r, "url", None), getattr(r, "title", None))
-
-    return sources[:MAX_SOURCES]
+            out.append({"url": url, "title": r.get("title") or url})
+    return out[:MAX_SOURCES]
 
 
-def _history_messages(history: list[dict] | None, query: str) -> list[dict]:
-    """Build the messages array: prior conversation turns, then the new question.
+def _format_results(results: list[dict]) -> str:
+    if not results:
+        return "(no search results were returned)"
+    blocks = []
+    for i, r in enumerate(results[:MAX_SOURCES], 1):
+        date = f" — published {r['published_date']}" if r.get("published_date") else ""
+        blocks.append(f"[{i}] {r.get('title') or r.get('url')}{date}\n{r.get('url')}\n{r.get('content') or ''}")
+    return "\n\n".join(blocks)
 
-    ``history`` is [{role, content}] from conversation_history(). Only user/
-    assistant roles with non-empty content are kept, and a leading assistant turn
-    is dropped so the array always starts with a user message (API requirement).
+
+def _history_messages(history: list[dict] | None, query: str, results: list[dict]) -> list[dict]:
+    """Build the messages array: recent conversation turns, then the new question
+    with its search results.
+
+    ``history`` is [{role, content}] from conversation_history(). Only the last
+    HISTORY_TURNS user/assistant turns are kept (each truncated) so prompts stay
+    inside Groq's free-tier tokens-per-minute limits.
     """
     msgs: list[dict] = []
-    for h in history or []:
+    for h in (history or [])[-HISTORY_TURNS:]:
         role = h.get("role")
         content = (h.get("content") or "").strip()
         if role in ("user", "assistant") and content:
-            msgs.append({"role": role, "content": content})
+            msgs.append({"role": role, "content": content[:HISTORY_CHARS]})
     while msgs and msgs[0]["role"] != "user":
         msgs.pop(0)
-    msgs.append({"role": "user", "content": query})
+    today = _dt.date.today().isoformat()
+    msgs.append({
+        "role": "user",
+        "content": f"Today's date: {today}\n\nWeb search results:\n\n{_format_results(results)}"
+                   f"\n\nQuestion: {query}",
+    })
     return msgs
 
 
+# Output budgets per style (gpt-oss reasoning tokens count toward these too).
+_MAX_TOKENS = {"A": 1400, "B": 2600}
+
+
 def search_and_answer(
-    client: anthropic.Anthropic,
     query: str,
     lessons: list[str],
     routing: dict,
     style: str | None = None,
     on_text=None,
     history: list[dict] | None = None,
+    results: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
-    """Answer a query with web-search RAG, aggregated by the routed model.
+    """Answer a query from Tavily results, aggregated by the routed Groq model.
 
-    Web search ALWAYS runs (same retrieval for every query) — ``routing`` (from
-    classify_query) only selects which model aggregates the results into the
-    answer: Haiku for simple/medium, Sonnet for complex. ``style`` (STYLE_A /
-    STYLE_B) tunes the synthesis approach for A/B comparison. ``history`` (prior
-    conversation turns) is prepended so follow-up questions resolve in context.
-    Returns (answer_text, sources). If ``on_text`` is given, text chunks are
-    streamed to it as they arrive (used by the terminal for live output).
+    ``results`` are the pre-fetched search results (one search is shared by A
+    and B); when omitted, a search is run here (CLI path). ``routing`` (from
+    classify_query) selects the model; ``style`` (STYLE_A / STYLE_B) tunes the
+    synthesis for the A/B comparison. Returns (answer_text, sources).
     """
-    kwargs = dict(
-        model=routing["model"],
-        max_tokens=8000,
+    if results is None:
+        results = providers.search(query, max_results=MAX_SOURCES)
+    model = routing["model"]
+    budget = _MAX_TOKENS["B"] if style == STYLE_B else _MAX_TOKENS["A"]
+    answer = providers.chat(
+        model,
+        _history_messages(history, query, results),
+        max_tokens=budget,
         system=build_system_prompt(lessons, style=style),
-        tools=[WEB_SEARCH_TOOL],
-        messages=_history_messages(history, query),
-        **_reasoning_kwargs(routing["model"]),
+        effort=_effort(model),
     )
-
-    with client.messages.stream(**kwargs) as stream:
-        for text in stream.text_stream:
-            if on_text:
-                on_text(text)
-        final = stream.get_final_message()
-
-    answer = "".join(b.text for b in final.content if b.type == "text").strip()
-    return answer, extract_sources(final)
+    if on_text:
+        on_text(answer)
+    return answer, sources_from_results(results)
 
 
 def iter_ab_answers(
-    client: anthropic.Anthropic,
     query: str,
     lessons: list[str],
     routing_by_side: dict[str, dict],
     history: list[dict] | None = None,
+    results: list[dict] | None = None,
     timeout: float = ANSWER_TIMEOUT_S,
 ):
-    """Generate Answer A and B in parallel, yielding each as soon as it's ready.
+    """Generate Answer A and B in parallel from the SAME search results, yielding
+    each as soon as it's ready.
 
-    ``routing_by_side`` maps "A"/"B" → routing dict (see ab_routings; on complex
-    queries A is Haiku and B is Sonnet, so the fast one streams out first). Yields
-    ``(side, {"answer", "sources"})`` on success or ``(side, {"error": msg})`` when a
-    draft fails or exceeds ``timeout`` seconds. Each draft is bounded independently,
-    so a slow Sonnet B never blocks delivering a finished Haiku A.
-
-    A is factual & concise (STYLE_A); B is detailed & analytical (STYLE_B) — the
-    two distinct styles (plus the model split) keep the answers genuinely different.
+    Yields ``(side, {"answer", "sources"})`` on success or ``(side, {"error": msg,
+    "limit": bool})`` when a draft fails (``limit`` = provider rate limit) or exceeds
+    ``timeout`` seconds. A is factual & concise (STYLE_A); B is detailed &
+    analytical (STYLE_B).
     """
+    if results is None:
+        results = providers.search(query, max_results=MAX_SOURCES)
     styles = {"A": STYLE_A, "B": STYLE_B}
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futs = {
-            pool.submit(search_and_answer, client, query, lessons,
-                        routing_by_side[side], styles[side], None, history): side
-            for side in ("A", "B")
-        }
-        pending = set(futs)
-        try:
-            for fut in as_completed(futs, timeout=timeout):
-                side = futs[fut]
-                pending.discard(fut)
-                try:
-                    ans, src = fut.result()
-                    yield side, {"answer": ans, "sources": src}
-                except Exception as exc:  # noqa: BLE001 — keep the other side alive
-                    yield side, {"error": str(exc) or exc.__class__.__name__}
-        except FuturesTimeoutError:
-            pass  # remaining sides blew the per-answer budget; reported below
-        for fut in pending:
-            fut.cancel()
-            yield futs[fut], {"error": f"timed out after {int(timeout)}s"}
+    pool = ThreadPoolExecutor(max_workers=2)
+    futs = {
+        pool.submit(search_and_answer, query, lessons, routing_by_side[side],
+                    styles[side], None, history, results): side
+        for side in ("A", "B")
+    }
+    pending = set(futs)
+    try:
+        for fut in as_completed(futs, timeout=timeout):
+            side = futs[fut]
+            pending.discard(fut)
+            try:
+                ans, src = fut.result()
+                if not ans:
+                    raise providers.ProviderError("empty answer")
+                yield side, {"answer": ans, "sources": src}
+            except providers.ProviderLimit as exc:
+                yield side, {"error": str(exc), "limit": True}
+            except Exception as exc:  # noqa: BLE001 — keep the other side alive
+                yield side, {"error": str(exc) or exc.__class__.__name__, "limit": False}
+    except FuturesTimeoutError:
+        pass  # remaining sides blew the per-answer budget; reported below
+    finally:
+        pool.shutdown(wait=False)
+    for fut in pending:
+        fut.cancel()
+        yield futs[fut], {"error": f"timed out after {int(timeout)}s", "limit": False}
 
 
-def generate_ab_answers(
-    client: anthropic.Anthropic,
-    query: str,
-    lessons: list[str],
-    routing: dict,
-    history: list[dict] | None = None,
-) -> dict:
-    """Non-streaming A/B generation: collect both drafts, then return them together.
-
-    Thin wrapper over iter_ab_answers for callers that want a single dict rather
-    than a stream. Both sides use the same ``routing``. Resilient to a flaky API:
-    if only one draft succeeds it's returned with ``single=True``; raises only if
-    BOTH fail. Returns {"a": {...}, "b": {...} | None, "single": bool}.
-    """
-    results: dict[str, dict] = {}
-    for side, res in iter_ab_answers(client, query, lessons,
-                                     {"A": routing, "B": routing}, history):
-        if "answer" in res:
-            results[side] = res
-    if "A" in results and "B" in results:
-        return {"a": results["A"], "b": results["B"], "single": False}
-    if results:  # exactly one survived — serve it as a single answer
-        only = results.get("A") or results.get("B")
-        return {"a": only, "b": None, "single": True}
-    raise RuntimeError("Both A/B answers failed to generate.")
-
-
-def suggest_followups(
-    client: anthropic.Anthropic, query: str, answer: str, n: int = 3
-) -> list[str]:
-    """Suggest ``n`` short follow-up questions based on an answer (cheap Haiku call).
+def suggest_followups(query: str, answer: str, n: int = 3) -> list[str]:
+    """Suggest ``n`` short follow-up questions based on an answer (fast model).
 
     Returns a list of question strings, or [] on any failure (non-critical UI).
     """
@@ -1909,14 +1792,9 @@ def suggest_followups(
         f"Reply with ONLY the {n} questions, one per line, no numbering or extra text."
     )
     try:
-        resp = client.messages.create(
-            model=HAIKU_MODEL,
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except anthropic.APIError:
+        text = providers.chat(FAST_MODEL, [{"role": "user", "content": prompt}], max_tokens=500)
+    except (providers.ProviderLimit, providers.ProviderError):
         return []
-    text = next((b.text for b in resp.content if b.type == "text"), "")
     lines = [
         ln.strip().lstrip("-*0123456789. ").strip()
         for ln in text.splitlines()
@@ -1926,7 +1804,6 @@ def suggest_followups(
 
 
 def regenerate_answer(
-    client: anthropic.Anthropic,
     *,
     original_query: str,
     improved_query: str,
@@ -1938,10 +1815,9 @@ def regenerate_answer(
 ) -> str:
     """Re-answer WITHOUT searching again — reuse the already-retrieved results.
 
-    Used for retries after a thumbs-down so they stay fast: no second web search,
-    only the answer is regenerated with improved framing, grounded in the same
-    findings (the prior answer + the original source list). Returns the new answer
-    text; the caller reuses the original ``sources`` for display.
+    Used for retries after a thumbs-down: no second Tavily search (no credit
+    spent), only the answer is regenerated with the deep model, grounded in the
+    same findings (the prior answer + the original source list).
     """
     complaint = comment.strip() if comment and comment.strip() else "(no specific comment given)"
     source_lines = "\n".join(f"- {s.get('title') or s.get('url')} ({s.get('url')})" for s in sources)
@@ -1966,26 +1842,16 @@ def regenerate_answer(
         f"User's complaint about the previous answer: {complaint}\n\n"
         "Information already gathered from the earlier web search — base your answer "
         "ONLY on this:\n\n"
-        f"Previous answer (grounded in the sources):\n{previous_answer}\n\n"
+        f"Previous answer (grounded in the sources):\n{previous_answer[:4000]}\n\n"
         f"Sources that were retrieved:\n{source_lines or '(none)'}\n\n"
         "Write an improved answer that fixes the user's complaint while staying "
         "faithful to the gathered information above. Do not search again."
     )
-
-    # Retries improve an answer the user rejected, so use the capable model.
-    with client.messages.stream(
-        model=SONNET_MODEL,
-        max_tokens=4000,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        **_reasoning_kwargs(SONNET_MODEL),
-    ) as stream:
-        for text in stream.text_stream:
-            if on_text:
-                on_text(text)
-        final = stream.get_final_message()
-
-    return "".join(b.text for b in final.content if b.type == "text").strip()
+    text = providers.chat(DEEP_MODEL, [{"role": "user", "content": user}], max_tokens=2600,
+                          system=system, effort=_effort(DEEP_MODEL))
+    if on_text:
+        on_text(text)
+    return text
 
 
 def print_sources(sources: list[dict]) -> None:
@@ -2000,13 +1866,12 @@ def print_sources(sources: list[dict]) -> None:
 
 
 def rephrase_query(
-    client: anthropic.Anthropic,
     *,
     original_query: str,
     failed_answer: str,
     comment: str | None,
 ) -> str:
-    """Ask Claude to improve a query that produced an unhelpful answer."""
+    """Ask the fast model to improve a query that produced an unhelpful answer."""
     complaint = comment.strip() if comment and comment.strip() else "(no specific comment given)"
     prompt = (
         "A search query produced an answer the user judged unhelpful. "
@@ -2017,14 +1882,7 @@ def rephrase_query(
         f"User's complaint: {complaint}\n"
         f"Previous answer (which fell short):\n{failed_answer[:1500]}"
     )
-    # A small rewriting task — the cheap model handles it well.
-    resp = client.messages.create(
-        model=MODEL,
-        max_tokens=300,
-        messages=[{"role": "user", "content": prompt}],
-        **_reasoning_kwargs(MODEL),
-    )
-    text = next((b.text for b in resp.content if b.type == "text"), "").strip()
+    text = providers.chat(MODEL, [{"role": "user", "content": prompt}], max_tokens=400).strip()
     return text or original_query
 
 
@@ -2054,7 +1912,7 @@ def collect_feedback() -> tuple[str | None, str | None]:
 def compute_metrics(conn: sqlite3.Connection, session_id: str | None = None) -> dict:
     """Compute query-group-level dashboard metrics for one user (None = all users).
 
-    The North Star — total queries, completion rate, model mix, cost saved — is
+    The North Star — total queries, completion rate, model mix, cost estimate — is
     scoped to ``session_id`` so each signed-in user sees their own stats.
     """
     if session_id is None:
@@ -2077,10 +1935,9 @@ def compute_metrics(conn: sqlite3.Connection, session_id: str | None = None) -> 
         ).fetchall()
 
     groups: dict[int, dict] = {}
-    # Per-model-call tallies (every interaction is one aggregation call).
-    models_used = {"Haiku": 0, "Sonnet": 0}
-    cost_actual = 0.0       # estimated $ actually spent on aggregation calls
-    cost_all_sonnet = 0.0   # estimated $ had we always used Sonnet
+    # Per-model-call tallies (every interaction is one answer call).
+    models_used = {FAST_LABEL: 0, DEEP_LABEL: 0}
+    est_cost = 0.0          # estimated $ at Groq list prices (free tier → $0 actual)
     for group, original, attempt, feedback, routing in rows:
         g = groups.setdefault(
             group,
@@ -2093,22 +1950,21 @@ def compute_metrics(conn: sqlite3.Connection, session_id: str | None = None) -> 
         elif feedback == "down" and g["best_feedback"] is None:
             g["best_feedback"] = "down"
 
-        # Model-mix + cost accounting across every aggregation call.
         if routing:
             try:
                 rt = json.loads(routing)
             except (json.JSONDecodeError, TypeError):
                 rt = None
             if rt:
-                model = rt.get("model") or SONNET_MODEL
-                label = "Sonnet" if model.startswith("claude-sonnet") else "Haiku"
+                model = rt.get("model") or FAST_MODEL
+                label = rt.get("model_label") or label_for(model)
                 models_used[label] = models_used.get(label, 0) + 1
-                cost_actual += estimate_query_cost(model)
-                cost_all_sonnet += estimate_query_cost(SONNET_MODEL)
+                est_cost += estimate_query_cost(model)
 
     total_queries = len(groups)
-    # Estimated $ saved by routing to Haiku vs. always using Sonnet.
-    cost_saved_usd = round(cost_all_sonnet - cost_actual, 4)
+    calls = sum(models_used.values())
+    fast_share_pct = round(models_used.get(FAST_LABEL, 0) / calls * 100, 1) if calls else 0.0
+    est_cost_per_query_usd = (est_cost / total_queries) if total_queries else 0.0
     # Only count queries that received any feedback toward the completion rate.
     rated = [g for g in groups.values() if g["best_feedback"] is not None]
     completed = [g for g in rated if g["best_feedback"] == "up"]
@@ -2127,7 +1983,9 @@ def compute_metrics(conn: sqlite3.Connection, session_id: str | None = None) -> 
         "completion_rate": completion_rate,
         "most_improved": most_improved,
         "models_used": models_used,
-        "cost_saved_usd": cost_saved_usd,
+        "model_labels": {"fast": FAST_LABEL, "deep": DEEP_LABEL},
+        "fast_share_pct": fast_share_pct,
+        "est_cost_per_query_usd": round(est_cost_per_query_usd, 6),
     }
 
 
@@ -2143,8 +2001,9 @@ def show_dashboard(conn: sqlite3.Connection) -> None:
     print(f"  Total queries handled : {m['total_queries']}")
     print(f"  Queries with feedback : {m['rated_queries']}")
     mu = m["models_used"]
-    print(f"  🤖 Models used        : Haiku {mu.get('Haiku', 0)} · Sonnet {mu.get('Sonnet', 0)}")
-    print(f"  💰 Est. cost saved    : ${m['cost_saved_usd']:.4f}  (vs always Sonnet)")
+    print(f"  🤖 Models used        : {FAST_LABEL} {mu.get(FAST_LABEL, 0)} · {DEEP_LABEL} {mu.get(DEEP_LABEL, 0)}")
+    print(f"  ⚡ Fast-model share   : {m['fast_share_pct']:.0f}%")
+    print(f"  💰 Est. cost / query  : ${m['est_cost_per_query_usd']:.5f}  (estimate at Groq list prices)")
     print("\n  ★ NORTH STAR — Task Completion Rate")
     print(f"    [{bar}] {m['completion_rate']:.1f}%")
     print("    (% of rated queries that earned a thumbs up)")
@@ -2160,19 +2019,17 @@ def show_dashboard(conn: sqlite3.Connection) -> None:
 # --------------------------------------------------------------------------- #
 # Main loop
 # --------------------------------------------------------------------------- #
-def handle_query(
-    client: anthropic.Anthropic, conn: sqlite3.Connection, original_query: str
-) -> None:
+def handle_query(conn, original_query: str) -> None:
     """Run one query through search → feedback → (reuse-results retry) cycles."""
     group = next_query_group(conn)
     _stream = lambda t: print(t, end="", flush=True)  # noqa: E731
 
-    # Pre-process: size the query and pick the model + tools before calling Claude.
+    # Pre-process: size the query and pick the model before calling Groq.
     routing = classify_query(original_query)
     print(f"\n🧭 Routing: {routing['badge']}")
     print("\n🔎 Searching the web…\n\nAnswer:\n")
     answer, sources = search_and_answer(
-        client, original_query, recent_lessons(conn), routing, on_text=_stream
+        original_query, recent_lessons(conn), routing, on_text=_stream
     )
     print("\n")
     print_sources(sources)
@@ -2206,7 +2063,6 @@ def handle_query(
         # Retry is fast: reuse the original search results, only re-answer.
         print("  Got negative feedback — improving the answer (reusing earlier sources, no new search)…\n")
         effective_query = rephrase_query(
-            client,
             original_query=original_query,
             failed_answer=answer,
             comment=comment,
@@ -2214,7 +2070,6 @@ def handle_query(
         print(f'  Improved framing → "{effective_query}"')
         print(f"  🧭 Routing: {retry_routing['badge']}\n\nAnswer:\n")
         answer = regenerate_answer(
-            client,
             original_query=original_query,
             improved_query=effective_query,
             previous_answer=answer,
@@ -2228,21 +2083,17 @@ def handle_query(
 
 
 def main() -> int:
-    api_key = sanitize_env_secret("ANTHROPIC_API_KEY")
-    sanitize_env_secret("ANTHROPIC_AUTH_TOKEN")
-    if not (api_key or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        print(
-            "Error: set ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) before running.",
-            file=sys.stderr,
-        )
+    sanitize_env_secret("GROQ_API_KEY")
+    sanitize_env_secret("TAVILY_API_KEY")
+    if not providers.configured():
+        print("Error: set GROQ_API_KEY and TAVILY_API_KEY before running.", file=sys.stderr)
         return 1
 
-    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
-    conn = sqlite3.connect(DB_PATH)
+    conn = db.connect()
     init_db(conn)
 
     print("Search Evaluation Agent — type a query, or 'quit' to exit.")
-    print(f"(Storing to {DB_PATH})\n")
+    print(f"(Storing to {db.describe()})\n")
 
     queries_this_run = 0
     try:
@@ -2259,7 +2110,7 @@ def main() -> int:
                 show_dashboard(conn)
                 continue
 
-            handle_query(client, conn, query)
+            handle_query(conn, query)
             queries_this_run += 1
 
             if queries_this_run % DASHBOARD_EVERY == 0:
