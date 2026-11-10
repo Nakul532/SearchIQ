@@ -5,7 +5,8 @@ the public daily caps aren't touched. Every step is resumable: results are
 appended to eval/results/*.jsonl after each call, and finished items are skipped.
 
     python eval/searchiq_eval.py answer     # 40 Tavily searches + 80 answers
-    python eval/searchiq_eval.py judge      # 80 judge verdicts
+    python eval/searchiq_eval.py judge      # 80 judge verdicts (+ arm C once it exists)
+    python eval/searchiq_eval.py arm_c      # arm C: SearchIQ v2 = B's answer + the agent's claim check
     python eval/searchiq_eval.py sample     # writes results/human_scores.csv (10 random)
     python eval/searchiq_eval.py agree      # judge-vs-human agreement
     python eval/searchiq_eval.py report     # eval/README.md results + eval/chart.svg
@@ -28,6 +29,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
+import agent  # noqa: E402
 import providers  # noqa: E402
 import search_agent as sa  # noqa: E402
 
@@ -41,6 +43,7 @@ QUESTIONS = os.path.join(HERE, "business_questions.jsonl" if _BUSINESS else "que
 ANSWERS = os.path.join(RESULTS, "answers.jsonl")
 SEARCHES = os.path.join(RESULTS, "searches.jsonl")
 JUDGE = os.path.join(RESULTS, "judge.jsonl")
+ARM_C = os.path.join(RESULTS, "arm_c.jsonl")
 BUDGET = os.path.join(RESULTS, "budget.json")
 HUMAN = os.path.join(RESULTS, "human_scores.csv")
 
@@ -116,7 +119,7 @@ def judge_user(q: dict, arm: str, answer: str, results: list[dict]) -> str:
     return (f"QUESTION GROUP: {q['group']}{' (TRICK question)' if is_trick(q) else ''}\n"
             f"QUESTION: {q['question']}\n"
             f"ANSWER KEY: {q['answer_key']}\nGRADING NOTES: {q['grading_notes']}\n"
-            f"ANSWER HAD SOURCES: {'yes (numbered [1]-[3], same as the reference snippets)' if arm == 'B' else 'no'}\n\n"
+            f"ANSWER HAD SOURCES: {'yes (numbered [1]-[3], same as the reference snippets)' if arm in ('B', 'C') else 'no'}\n\n"
             f"REFERENCE SNIPPETS:\n{refs}\n\nANSWER TO GRADE:\n{answer}")
 
 
@@ -273,6 +276,58 @@ def cmd_answer() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Step 1b: arm C — SearchIQ v2 (B's answer + the agent's claim check)
+# --------------------------------------------------------------------------- #
+# Arm C is exactly what a v2 user sees under answer B: the arm-B answer text
+# (reused, not regenerated, so the only difference from B is the check),
+# followed by agent.render_note() — confidence label, per-claim labels and any
+# false-premise warning. The check runs agent.check_answers() unchanged, with
+# the answer model at temperature 0. It checks B alone: eval arm A has no
+# retrieval, unlike the live app's A, so the disagreement view isn't evaluated.
+def cmd_arm_c() -> None:
+    qs = {q["id"]: q for q in questions()}
+    searches = {r["id"]: r for r in load_jsonl(SEARCHES)}
+    b_rows = {r["id"]: r for r in load_jsonl(ANSWERS) if r["arm"] == "B"}
+    done = {r["id"] for r in load_jsonl(ARM_C)}
+    for qid, b in b_rows.items():
+        if qid in done:
+            continue
+        if not room(ANSWER_MODEL, 4000):
+            print(f"Daily token cap for {ANSWER_MODEL} reached ({DAILY_TOKEN_CAP}). Rerun tomorrow to resume.")
+            return
+        spent: list[tuple[dict, float]] = []
+
+        def llm(system, user, max_tokens, effort):
+            text, usage, secs = call(ANSWER_MODEL, system, user, max_tokens=max_tokens, effort=effort)
+            spent.append((usage, secs))
+            return text
+
+        check = None
+        for _ in range(2):
+            check = agent.check_answers(qs[qid]["question"], searches[qid]["results"], {"B": b["answer"]},
+                                        llm=llm, n_sources=sa.MAX_SOURCES)
+            if check:
+                break
+        note = agent.render_note(check, "B") if check else ""
+        usage = {k: sum(u.get(k, 0) for u, _ in spent) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+        check_secs = sum(t for _, t in spent)
+        append_jsonl(ARM_C, {
+            "id": qid, "group": b["group"], "arm": "C", "model": ANSWER_MODEL,
+            "answer": b["answer"] + ("\n\n" + note if note else ""), "base_answer_arm": "B",
+            "check": check, "sources": b["sources"],
+            "usage": usage, "check_usage": usage,
+            "latency_s": round(b["latency_s"] + check_secs, 3),
+            "cost_usd": round(b["cost_usd"] + cost(ANSWER_MODEL, usage), 7),
+            "tavily_credits": 1, "run_date": _today(),
+            "backend": "openrouter→groq" if BACKEND == "openrouter" else "groq",
+        })
+        lvl = check["sides"]["B"]["confidence"]["level"] if check else "no check"
+        prem = "" if not check or check["premise"]["ok"] else " · premise flagged"
+        print(f"{qid}/C: {lvl}{prem}, {usage['total_tokens']} tok", flush=True)
+    print("Arm C done.")
+
+
+# --------------------------------------------------------------------------- #
 # Step 2: judge
 # --------------------------------------------------------------------------- #
 def parse_verdict(text: str) -> dict:
@@ -289,9 +344,7 @@ def cmd_judge() -> None:
     qs = {q["id"]: q for q in questions()}
     searches = {r["id"]: r for r in load_jsonl(SEARCHES)}
     done = {(r["id"], r["arm"]) for r in load_jsonl(JUDGE)}
-    answers = load_jsonl(ANSWERS)
-    if len(answers) < 80:
-        print(f"Only {len(answers)}/80 answers so far — judging what exists.")
+    answers = load_jsonl(ANSWERS) + load_jsonl(ARM_C)
     for a in answers:
         if (a["id"], a["arm"]) in done:
             continue
@@ -372,12 +425,13 @@ def cmd_agree() -> None:
 # Step 4: report
 # --------------------------------------------------------------------------- #
 def summarize() -> dict:
-    answers = {(r["id"], r["arm"]): r for r in load_jsonl(ANSWERS)}
+    answers = {(r["id"], r["arm"]): r for r in load_jsonl(ANSWERS) + load_jsonl(ARM_C)}
     judge = {(r["id"], r["arm"]): r for r in load_jsonl(JUDGE)}
     qs = {q["id"]: q for q in questions()}
+    arms = ["A", "B"] + (["C"] if any(k[1] == "C" for k in answers) else [])
     out = {}
     for g in GROUPS + ["all"]:
-        for arm in ("A", "B"):
+        for arm in arms:
             keys = [k for k in answers if k[1] == arm and in_group(qs[k[0]], g)]
             js = [judge[k] for k in keys if k in judge]
             ans = [answers[k] for k in keys]
@@ -398,6 +452,42 @@ def summarize() -> dict:
     return out
 
 
+def checker_diagnostics() -> dict | None:
+    """Exploratory (not in the locked rubric): does the v2 check flag the right
+    answers? "Flagged" = confidence not High, or the premise was flagged. Scored
+    against the judge's verdict on the same answer as plain arm B."""
+    rows = load_jsonl(ARM_C)
+    if not rows:
+        return None
+    judge = {(r["id"], r["arm"]): r for r in load_jsonl(JUDGE)}
+    qs = {q["id"]: q for q in questions()}
+    out = {"n": 0, "no_check": 0, "wrong_b": 0, "wrong_b_flagged": 0, "right_b": 0, "right_b_flagged": 0,
+           "trick": 0, "trick_premise_flagged": 0, "nontrick": 0, "nontrick_premise_flagged": 0,
+           "levels": {}}
+    for r in rows:
+        jb = judge.get((r["id"], "B"))
+        if not jb:
+            continue
+        out["n"] += 1
+        c = r.get("check")
+        if not c:
+            out["no_check"] += 1
+            continue
+        lvl = c["sides"]["B"]["confidence"]["level"]
+        out["levels"][lvl] = out["levels"].get(lvl, 0) + 1
+        flagged = lvl != "high" or not c["premise"]["ok"]
+        if jb["correctness"] < 2:
+            out["wrong_b"] += 1
+            out["wrong_b_flagged"] += flagged
+        else:
+            out["right_b"] += 1
+            out["right_b_flagged"] += flagged
+        t = "trick" if is_trick(qs[r["id"]]) else "nontrick"
+        out[t] += 1
+        out[f"{t}_premise_flagged"] += not c["premise"]["ok"]
+    return out
+
+
 def chart_svg(s: dict) -> str:
     """Grouped bar chart: correctness % per group, A vs B (no dependencies)."""
     W, H, L, B_, T = 640, 300, 56, 56, 34
@@ -406,9 +496,11 @@ def chart_svg(s: dict) -> str:
     names = {"recent": "Recent", "stable": "Stable (control)", "multistep": "Multi-step",
              "trick": "Trick", "all": "Overall", "companies": "Companies", "markets": "Markets",
              "earnings": "Earnings", "acquisitions": "Acquisitions", "postcutoff": "† Post-cutoff"}
-    col = {"A": "#94a3b8", "B": "#4f46e5"}
+    col = {"A": "#94a3b8", "B": "#4f46e5", "C": "#0d9488"}
+    arms = [a for a in ("A", "B", "C") if (groups[0], a) in s]
     slot = plot_w / len(groups)
-    bw = slot * 0.32
+    bw = slot * (0.64 / len(arms))
+    fs = 12 if len(arms) == 2 else 10
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" font-family="system-ui,sans-serif" font-size="12">',
              f'<rect width="{W}" height="{H}" fill="#ffffff"/>',
              f'<text x="{L}" y="20" font-size="14" font-weight="700" fill="#111827">Correctness vs answer key (% of points), by question group</text>']
@@ -418,15 +510,17 @@ def chart_svg(s: dict) -> str:
         parts.append(f'<text x="{L-8}" y="{y+4:.1f}" text-anchor="end" fill="#6b7280">{p}%</text>')
     for i, g in enumerate(groups):
         x0 = L + i * slot + slot * 0.16
-        for j, arm in enumerate(("A", "B")):
+        for j, arm in enumerate(arms):
             v = s[(g, arm)]["correct_pct"] or 0
             h = plot_h * v / 100
             x = x0 + j * (bw + 4)
             parts.append(f'<rect x="{x:.1f}" y="{T+plot_h-h:.1f}" width="{bw:.1f}" height="{h:.1f}" fill="{col[arm]}" rx="2"/>')
-            parts.append(f'<text x="{x+bw/2:.1f}" y="{T+plot_h-h-4:.1f}" text-anchor="middle" fill="#111827">{v:.0f}</text>')
+            parts.append(f'<text x="{x+bw/2:.1f}" y="{T+plot_h-h-4:.1f}" text-anchor="middle" font-size="{fs}" fill="#111827">{v:.0f}</text>')
         parts.append(f'<text x="{L+i*slot+slot/2:.1f}" y="{T+plot_h+18:.1f}" text-anchor="middle" fill="#374151">{names[g]}</text>')
     lx = L
-    for arm, label in (("A", "A: no retrieval"), ("B", "B: SearchIQ + Tavily")):
+    for arm, label in (("A", "A: no retrieval"), ("B", "B: SearchIQ + Tavily"), ("C", "C: B + v2 claim check")):
+        if arm not in arms:
+            continue
         parts.append(f'<rect x="{lx}" y="{H-18}" width="12" height="12" fill="{col[arm]}" rx="2"/>')
         parts.append(f'<text x="{lx+18}" y="{H-8}" fill="#374151">{label}</text>')
         lx += 170
@@ -441,6 +535,11 @@ def cmd_report() -> None:
         f.write(chart_svg(s))
     with open(os.path.join(RESULTS, "summary.json"), "w") as f:
         json.dump({f"{g}|{a}": v for (g, a), v in s.items()}, f, indent=1)
+    diag = checker_diagnostics()
+    if diag:
+        with open(os.path.join(RESULTS, "checker_diagnostics.json"), "w") as f:
+            json.dump(diag, f, indent=1)
+        print("checker:", json.dumps(diag))
     print("Wrote eval/chart.svg and results/summary.json")
     print(json.dumps({f"{g}|{a}": v for (g, a), v in s.items()}, indent=1))
     ag = agreement()
@@ -449,14 +548,14 @@ def cmd_report() -> None:
 
 
 if __name__ == "__main__":
-    cmds = {"answer": cmd_answer, "judge": cmd_judge, "sample": cmd_sample,
+    cmds = {"answer": cmd_answer, "arm_c": cmd_arm_c, "judge": cmd_judge, "sample": cmd_sample,
             "agree": cmd_agree, "report": cmd_report}
     if len(sys.argv) != 2 or sys.argv[1] not in cmds:
         print(__doc__)
         raise SystemExit(2)
     if BACKEND == "openrouter" and not os.environ.get("OPENROUTER_API_KEY"):
         raise SystemExit("EVAL_BACKEND=openrouter needs OPENROUTER_API_KEY in .env.")
-    if BACKEND != "openrouter" and sys.argv[1] in ("answer", "judge") and not (os.environ.get("GROQ_API_KEY") and
+    if BACKEND != "openrouter" and sys.argv[1] in ("answer", "arm_c", "judge") and not (os.environ.get("GROQ_API_KEY") and
                                                     (os.environ.get("TAVILY_API_KEY") or sys.argv[1] == "judge")):
         if not providers.fake_mode():
             raise SystemExit("Set GROQ_API_KEY and TAVILY_API_KEY in .env first.")
