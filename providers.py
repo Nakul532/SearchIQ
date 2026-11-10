@@ -52,6 +52,12 @@ LIST_PRICES = {
 }
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+# The live rewrite + re-check (the check acting, arm D) run on a separate
+# prepaid OpenRouter key, pinned to Groq with fallbacks off, so a flagged
+# question doesn't run out of the free key's per-minute token limit. Same
+# prompts and model as locked eval arm D; override with SEARCHIQ_REWRITE_MODEL.
+REWRITE_MODEL = (os.environ.get("SEARCHIQ_REWRITE_MODEL") or FAST_MODEL).strip()
 TAVILY_URL = "https://api.tavily.com/search"
 HTTP_TIMEOUT_S = 60
 
@@ -101,19 +107,66 @@ usage_hook = None
 budget_check = None
 
 
+def _parse_reset(v: str) -> float:
+    """Groq reset headers look like '47.2s', '1m2.5s' or '850ms'."""
+    import re as _re
+    total = 0.0
+    for num, unit in _re.findall(r"([\d.]+)(ms|m|s|h)", v or ""):
+        total += float(num) * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[unit]
+    return total
+
+
 def _is_reasoning_model(model: str) -> bool:
     return model.startswith("openai/gpt-oss")
 
 
 def chat(model: str, messages: list[dict], max_tokens: int = 800,
-         system: str | None = None, effort: str = "low") -> str:
+         system: str | None = None, effort: str = "low", max_wait: float = 6, on_wait=None) -> str:
     """One chat completion on Groq; returns the assistant text (see chat_full)."""
-    return chat_full(model, messages, max_tokens=max_tokens, system=system, effort=effort)[0]
+    return chat_full(model, messages, max_tokens=max_tokens, system=system, effort=effort,
+                     max_wait=max_wait, on_wait=on_wait)[0]
+
+
+def openrouter_chat(model: str, messages: list[dict], max_tokens: int = 800,
+                    system: str | None = None, effort: str = "low", temperature: float = 0.4) -> str:
+    """One completion via OpenRouter, pinned to Groq with fallbacks off.
+
+    Raises ProviderError on ANY failure (no key, out of credit, expired key, a
+    non-Groq provider, network) so the caller can fall back to the free key."""
+    msgs = ([{"role": "system", "content": system}] if system else []) + messages
+    if fake_mode():
+        if os.environ.get("SEARCHIQ_FAKE_OPENROUTER_DOWN") == "1":
+            raise ProviderError("OpenRouter unavailable (simulated)")
+        last = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
+        return _fake_answer(model, last, system or "")
+    key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    if not key:
+        raise ProviderError("OPENROUTER_API_KEY not set")
+    body = {"model": model, "messages": msgs, "max_tokens": max_tokens, "temperature": temperature,
+            "provider": {"order": ["Groq"], "allow_fallbacks": False}}
+    if _is_reasoning_model(model):
+        body["reasoning"] = {"effort": effort, "exclude": True}
+    try:
+        resp = _session().post(f"{OPENROUTER_URL}/chat/completions", json=body,
+                               headers={"Authorization": f"Bearer {key}"}, timeout=HTTP_TIMEOUT_S)
+    except requests.RequestException as exc:
+        raise ProviderError(f"Could not reach OpenRouter: {exc.__class__.__name__}") from exc
+    if resp.status_code >= 400:
+        raise ProviderError(f"OpenRouter error {resp.status_code}")
+    data = resp.json()
+    if data.get("error"):
+        raise ProviderError(f"OpenRouter error: {str(data['error'])[:120]}")
+    if data.get("provider") != "Groq":
+        raise ProviderError(f"OpenRouter served {model} from {data.get('provider')!r}, not Groq")
+    text = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+    if not text:
+        raise ProviderError("OpenRouter returned an empty answer")
+    return text
 
 
 def chat_full(model: str, messages: list[dict], max_tokens: int = 800,
               system: str | None = None, effort: str = "low",
-              temperature: float = 0.4) -> tuple[str, dict]:
+              temperature: float = 0.4, max_wait: float = 6, on_wait=None) -> tuple[str, dict]:
     """One chat completion on Groq → (text, usage). usage has prompt_tokens /
     completion_tokens / total_tokens. The live app uses temperature 0.4; the
     eval passes 0 for repeatability.
@@ -157,8 +210,14 @@ def chat_full(model: str, messages: list[dict], max_tokens: int = 800,
             wait = float(resp.headers.get("retry-after", "0"))
         except ValueError:
             wait = 0
-        if attempt == 0 and 0 < wait <= 6:
+        if not wait:  # per-minute token limit: Groq says when the bucket refills
+            wait = _parse_reset(resp.headers.get("x-ratelimit-reset-tokens", ""))
+        if attempt == 0 and 0 < wait <= max_wait:
+            if on_wait:
+                on_wait(True)
             time.sleep(wait)
+            if on_wait:
+                on_wait(False)
             continue
         raise ProviderLimit("groq", "Groq free-tier rate limit reached")
     if resp.status_code == 429:

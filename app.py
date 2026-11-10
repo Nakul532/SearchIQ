@@ -19,6 +19,8 @@ import json
 import os
 import secrets
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import timedelta
 
 from flask import (Flask, Response, jsonify, redirect, render_template, request,
@@ -466,8 +468,20 @@ def api_query():
                     yield emit({"type": "step", "step": "revise", "status": "active",
                                 "detail": "Rewriting to fix what the check found"})
                     answers_now = {s: r["answer"] for s, r in results_by_side.items()}
-                    check, revisions = agent.revise_flagged(query, results, answers_now, check,
-                                                            n_sources=sa.MAX_SOURCES)
+                    status = {"waiting": False, "fallback": False}
+                    job = _REWRITE_POOL.submit(agent.revise_flagged, query, results, answers_now, check,
+                                               llm=_rewrite_llm(status), n_sources=sa.MAX_SOURCES)
+                    shown = False
+                    while True:
+                        try:
+                            check, revisions = job.result(timeout=0.5)
+                            break
+                        except FuturesTimeout:
+                            if status["waiting"] != shown:
+                                shown = status["waiting"]
+                                yield emit({"type": "step", "step": "revise", "status": "active",
+                                            "detail": "Waiting for capacity (free tier, up to 30s)" if shown
+                                                      else "Rewriting to fix what the check found"})
                     for side, rv in revisions.items():
                         results_by_side[side] = {**results_by_side[side], "answer": rv["answer"],
                                                  "original": rv["original"], "revision_reasons": rv["reasons"]}
@@ -575,6 +589,29 @@ def _serve_cached(conn, cached: dict, query: str, sid: str, conversation_id: str
         routing_a=routing_a, routing_b=routing_b,
     )
     yield emit({"type": "comparison", "comparison_id": comparison_id})
+
+
+_REWRITE_POOL = ThreadPoolExecutor(max_workers=4)
+REWRITE_MAX_WAIT_S = 30
+
+
+def _rewrite_llm(status: dict):
+    """LLM for the live rewrite + re-check: OpenRouter (pinned to Groq, prepaid
+    key) first; on any OpenRouter error, the free Groq key, waiting up to 30s for
+    per-minute capacity. Same prompt and model either way."""
+    def llm(system, user, max_tokens, effort):
+        msgs = [{"role": "user", "content": user}]
+        if not status["fallback"]:
+            try:
+                return providers.openrouter_chat(providers.REWRITE_MODEL, msgs, max_tokens=max_tokens,
+                                                 system=system, effort=effort)
+            except providers.ProviderError as exc:
+                app.logger.warning("Rewrite via OpenRouter failed (%s); using the free Groq key", exc)
+                status["fallback"] = True
+        return providers.chat(providers.REWRITE_MODEL, msgs, max_tokens=max_tokens, system=system,
+                              effort=effort, max_wait=REWRITE_MAX_WAIT_S,
+                              on_wait=lambda w: status.update(waiting=w))
+    return llm
 
 
 def _host(url) -> str:
