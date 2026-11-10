@@ -30,7 +30,6 @@ os.environ.update({
     "GUEST_IP_DAILY_CAP": "10",
     "USER_DAILY_CAP": "10",
     "SITE_DAILY_CAP": "25",
-    "DEMO_VIDEO_URL": "https://example.com/demo",
     "GOOGLE_CLIENT_ID": "", "GOOGLE_CLIENT_SECRET": "",
 })
 os.environ.pop("VERCEL", None)
@@ -228,7 +227,7 @@ def test_guest_cap_is_three_and_shows_limit_card():
     ev = ask(c, "Explain how plate tectonics shape mountains", conv="c4")
     assert types(ev) == ["limit"]
     card = ev[0]
-    assert card["reason"] == "guest" and card["demo_url"] == "https://example.com/demo"
+    assert card["reason"] == "guest" and "demo_url" not in card and "demo" not in card["message"].lower()
     assert "3 free searches" in card["title"] and card["resets_at"]
 
 
@@ -282,7 +281,7 @@ def test_simulated_groq_429_shows_limit_card_not_error():
     ev = ask(c, "Explain how solar panels convert sunlight to power")
     assert "limit" in types(ev) and "error" not in types(ev)
     card = next(e for e in ev if e["type"] == "limit")
-    assert card["demo_url"] == "https://example.com/demo" and card["title"]
+    assert "demo_url" not in card and card["title"]
     # A 429 must not count against the guest's own quota.
     assert c.get("/api/me").get_json()["quota"]["remaining"] == 3
     # The non-streaming endpoints degrade the same way.

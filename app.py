@@ -248,7 +248,6 @@ def api_me():
         "oauth_configured": OAUTH_CONFIGURED,
         "profile": profile,
         "quota": q,
-        "demo_url": limits.DEMO_VIDEO_URL or None,
         "models": {"fast": sa.FAST_LABEL, "deep": sa.DEEP_LABEL},
     })
 

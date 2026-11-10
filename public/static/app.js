@@ -727,15 +727,12 @@ function addError(msg) {
 }
 
 // Friendly "limit reached" card — shown instead of an error when a daily cap or a
-// provider's free-tier limit is hit. Offers the demo video and cached examples.
+// provider's free-tier limit is hit. Offers cached examples (and sign-in, when configured).
 function addLimitCard(info) {
   const el = document.createElement("div");
   el.className = "msg ai";
   const resets = info.resets_at
     ? new Date(info.resets_at).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })
-    : "";
-  const demo = info.demo_url
-    ? `<a class="limit-demo" href="${escapeAttr(info.demo_url)}" target="_blank" rel="noopener">▶ Watch the demo video</a>`
     : "";
   const signIn = info.reason === "guest" && ME.oauth_configured
     ? `<a class="limit-signin" href="/auth/login">Sign in with Google for more</a>` : "";
@@ -748,7 +745,7 @@ function addLimitCard(info) {
       <div class="limit-title">⏳ ${escapeHtml(info.title || "Daily limit reached")}</div>
       <div class="limit-body">${escapeHtml(info.message || "")}</div>
       ${resets ? `<div class="limit-reset">Resets ${escapeHtml(resets)} (your time)</div>` : ""}
-      <div class="limit-actions">${demo}${signIn}</div>
+      ${signIn ? `<div class="limit-actions">${signIn}</div>` : ""}
       ${ex ? `<div class="limit-ex-head">Try a cached example (free):</div><div class="limit-examples">${ex}</div>` : ""}
     </div>`;
   el.querySelectorAll(".limit-example").forEach((b) =>
